@@ -6,15 +6,22 @@ using UnityEngine.SceneManagement;
 using Sirenix.OdinInspector;
 #endif
 using Obscurus.Save;
+using Obscurus.Player;
 
 public class GameManager : MonoBehaviour
 {
     public static GameManager I { get; private set; }
 
+    // Události pro napojení dalších systémů (UI, SaveController)
     public static event Action<GameObject> OnPlayerSpawned;
     public static event Action OnPlayerDespawned;
 
     public GameObject CurrentPlayer { get; private set; }
+    
+    [Header("Dev / Testing")]
+    [Tooltip("Když je zapnuto, New Game nepromaže inventář (rychlé testování).")]
+    [SerializeField] bool devKeepInventoryOnNewGame = false;
+
 
     [Header("Startup")]
     [SerializeField] string defaultLevel = "Dev";
@@ -30,15 +37,19 @@ public class GameManager : MonoBehaviour
 
     [Header("Player Spawn")]
     [SerializeField] GameObject playerPrefab;
+    [Tooltip("Fallback – použije se, pokud ve scéně není PlayerSpawner.")]
     [SerializeField] string playerSpawnTag = "PlayerSpawn";
+    [Tooltip("Fallback – použije se, pokud ve scéně není PlayerSpawner.")]
     [SerializeField] string playerStartName = "PlayerStart";
 
-    [SerializeField] string pendingSpawnId;
+    [SerializeField] string pendingSpawnId; // jednorázově před LoadLevel()
     public void SetNextSpawn(string id) => pendingSpawnId = id;
 
     string _loadingLevelName;
+#if ODIN_INSPECTOR
+    [ShowInInspector, ReadOnly]
+#endif
     public string CurrentLevel { get; private set; }
-
     public bool InLevel => !string.IsNullOrEmpty(CurrentLevel);
 
     void Awake()
@@ -93,17 +104,32 @@ public class GameManager : MonoBehaviour
         CurrentLevel = levelName;
         StartCoroutine(LoadLevelRoutine(levelName));
     }
+    // GameManager.cs (uvnitř třídy)
+    bool PlayerAlreadyExistsIn(Scene target)
+    {
+        var go = GameObject.FindWithTag("Player");
+        if (!go) return false;
+
+        // Pokud je hráč v jiné scéně (např. DontDestroyOnLoad), znič ho a vrať false,
+        // aby proběhl čistý spawn v target scéně.
+        if (go.scene != target)
+        {
+            Debug.LogWarning($"[GameManager] Found stray Player in scene '{go.scene.name}'. Destroying so we can respawn in '{target.name}'.");
+            Destroy(go);
+            return false;
+        }
+
+        CurrentPlayer = go;
+        return true;
+    }
+
 
     IEnumerator LoadLevelRoutine(string levelName)
     {
-        // despawn starého hráče
-        if (CurrentPlayer)
-        {
-            OnPlayerDespawned?.Invoke();
-            CurrentPlayer = null;
-        }
+        // Despawn starého hráče (event pro UI/Save apod.)
+        DespawnPlayerHard("LoadLevel");
 
-        // unload vše kromě _Bootstrap
+        // Unload vše kromě _Bootstrap
         for (int i = 0; i < SceneManager.sceneCount; i++)
         {
             var s = SceneManager.GetSceneAt(i);
@@ -114,11 +140,11 @@ public class GameManager : MonoBehaviour
             }
         }
 
-        // načti scénu additivně
+        // Load additivně
         var op = SceneManager.LoadSceneAsync(levelName, LoadSceneMode.Additive);
         while (!op.isDone) yield return null;
 
-        // nastav jako aktivní
+        // Nastav jako active
         var lvl = SceneManager.GetSceneByName(levelName);
         if (lvl.IsValid()) SceneManager.SetActiveScene(lvl);
 
@@ -137,6 +163,10 @@ public class GameManager : MonoBehaviour
 
     IEnumerator ReturnRoutine()
     {
+        // 1) Nejdřív znič hráče (ať nezůstane v DontDestroyOnLoad)
+        DespawnPlayerHard("ReturnToMainMenu");
+
+        // 2) Pak unload vše kromě _Bootstrap
         for (int i = 0; i < SceneManager.sceneCount; i++)
         {
             var s = SceneManager.GetSceneAt(i);
@@ -146,107 +176,157 @@ public class GameManager : MonoBehaviour
                 if (u != null) while (!u.isDone) yield return null;
             }
         }
+
+        // 3) Reset stavů UI/GM
         CurrentLevel = null;
         _loadingLevelName = null;
         Time.timeScale = 1f;
-
-        if (CurrentPlayer)
-        {
-            CurrentPlayer = null;
-        }
-        OnPlayerDespawned?.Invoke();
 
         SetBootstrapCameraActive(true);
         if (showCursorInMenus) EnableMenuCursor();
     }
 
+
+    // === Cursor helpers ===
     public void EnableMenuCursor()
     {
         Cursor.visible = true;
         Cursor.lockState = CursorLockMode.None;
     }
-
     public void EnableGameplayCursor()
     {
         Cursor.visible = false;
         Cursor.lockState = CursorLockMode.Locked;
     }
 
-    // po načtení scény spawnuje hráče
+    // GameManager.cs (uvnitř třídy)
+    void DespawnPlayerHard(string reason = null)
+    {
+        if (!CurrentPlayer) return;
+
+        var go = CurrentPlayer;
+        CurrentPlayer = null;
+
+        try { OnPlayerDespawned?.Invoke(); }
+        catch (Exception e) { Debug.LogException(e); }
+
+        if (go) Destroy(go);
+        if (!string.IsNullOrEmpty(reason))
+            Debug.Log($"[GameManager] Player despawned ({reason}).");
+    }
+    
+    void ApplyNewGameResets(GameObject p)
+    {
+        if (!GameSaveController.IsNewGame || !p) return;
+
+        var health  = p.GetComponent<HealthSystem>();
+        var armor   = p.GetComponent<ArmorSystem>();
+        var stamina = p.GetComponent<StaminaSystem>();
+        health?.ResetToBase();
+        armor?.ResetToBase();
+        stamina?.ResetToBase();
+
+        if (!devKeepInventoryOnNewGame)
+        {
+            var inv = p.GetComponent<PlayerInventory>();
+            inv?.ResetAll(); // zdroje, munice, zbraně -> 0/empty
+        }
+
+        // Reset proběhne jen jednou při nové hře
+        GameSaveController.IsNewGame = false;
+    }
+
+
+    // === SceneLoaded → spawn hráče ===
     void OnSceneLoaded_SpawnPlayer(Scene s, LoadSceneMode mode)
     {
         if (s.name == "_Bootstrap") return;
 
-        // ochrana proti additivním loadům
+        // Spawn jen pro právě cílovanou scénu
         if (!string.IsNullOrEmpty(_loadingLevelName) && s.name != _loadingLevelName)
             return;
 
-        if (PlayerAlreadyExists())
+        GameObject p = null;
+
+        // 1) Pokud už ve stejné scéně hráč je, použij ho
+        if (PlayerAlreadyExistsIn(s))
         {
-            if (CurrentPlayer)
+            p = CurrentPlayer; // nastavuje se uvnitř PlayerAlreadyExistsIn()
+        }
+        else
+        {
+            // 2) Jinak spawnni nového
+            if (!playerPrefab)
             {
-                OnPlayerSpawned?.Invoke(CurrentPlayer);
-                StartCoroutine(EmitSpawnNextFrame(CurrentPlayer));
+                Debug.LogWarning("[GameManager] Player prefab není přiřazen.");
+                return;
             }
-            return;
+
+            // Najdi spawn
+            var spawn = FindSpawnInScene(s);
+            var pos = spawn ? spawn.position : Vector3.zero;
+            var rot = spawn ? spawn.rotation : Quaternion.identity;
+
+            // Spawnni hráče
+            p = Instantiate(playerPrefab, pos, rot);
+            p.name = playerPrefab.name;
+
+            // Jistota: přiřaď ho do právě načtené scény
+            SceneManager.MoveGameObjectToScene(p, s);
         }
 
-        if (!playerPrefab)
-        {
-            Debug.LogWarning("[GameManager] Player prefab není přiřazen.");
-            return;
-        }
-
-        var spawn = FindSpawnInScene(s);
-        var pos = spawn ? spawn.position : Vector3.zero;
-        var rot = spawn ? spawn.rotation : Quaternion.identity;
-
-        var player = Instantiate(playerPrefab, pos, rot);
-        player.name = playerPrefab.name;
-
+        // 3) Reset pouze při "Nové hře" (staty + případně inventář)
         if (GameSaveController.IsNewGame)
         {
-            var health  = player.GetComponent<HealthSystem>();
-            var armor   = player.GetComponent<ArmorSystem>();
-            var stamina = player.GetComponent<StaminaSystem>();
+            var health  = p.GetComponent<HealthSystem>();
+            var armor   = p.GetComponent<ArmorSystem>();
+            var stamina = p.GetComponent<StaminaSystem>();
             health?.ResetToBase();
             armor?.ResetToBase();
             stamina?.ResetToBase();
+
+            if (!devKeepInventoryOnNewGame)
+            {
+                var inv = p.GetComponent<PlayerInventory>();
+                inv?.ResetAll(); // zdroje, munice, zbraně -> 0/empty
+            }
+
+            // Reset spustit jen jednou
+            GameSaveController.IsNewGame = false;
         }
 
-        CurrentPlayer = player;
-        OnPlayerSpawned?.Invoke(player);
-        StartCoroutine(EmitSpawnNextFrame(player));
+        // 4) Ulož a vystřel eventy
+        CurrentPlayer = p;
+        OnPlayerSpawned?.Invoke(p);
+        StartCoroutine(EmitSpawnNextFrame(p));
 
+        // 5) Úklid loaderu
         pendingSpawnId = null;
         _loadingLevelName = null;
     }
 
+
     IEnumerator EmitSpawnNextFrame(GameObject player)
     {
-        yield return null;
+        yield return null; // UI/Addressables ready
         if (player) OnPlayerSpawned?.Invoke(player);
     }
 
     bool PlayerAlreadyExists()
     {
         var go = FindExistingPlayerGO();
-        if (go)
-        {
-            CurrentPlayer = go;
-            return true;
-        }
+        if (go) { CurrentPlayer = go; return true; }
         return false;
     }
 
     GameObject FindExistingPlayerGO()
     {
-        // už nehledáme SaveAgent, jen tag "Player"
-        return GameObject.FindWithTag("Player");
+        return GameObject.FindWithTag("Player"); // jednoduché a spolehlivé
     }
 
     Transform FindSpawnInScene(Scene scene)
     {
+        // 0) PlayerSpawner komponenta
         PlayerSpawner candidate = null;
 
         foreach (var root in scene.GetRootGameObjects())
@@ -262,39 +342,39 @@ public class GameManager : MonoBehaviour
             }
 
             foreach (var sp in spawners)
-                if (sp.isDefault)
-                    candidate = sp;
+                if (sp.isDefault) candidate = sp;
 
             if (candidate == null) candidate = spawners[0];
         }
 
         if (candidate) return candidate.transform;
 
+        // 1) Fallback: tag
         foreach (var root in scene.GetRootGameObjects())
         {
             if (!string.IsNullOrEmpty(playerSpawnTag))
             {
                 if (root.CompareTag(playerSpawnTag)) return root.transform;
                 var tagged = root.GetComponentsInChildren<Transform>(true);
-                foreach (var t in tagged)
-                    if (t.CompareTag(playerSpawnTag)) return t;
+                foreach (var t in tagged) if (t.CompareTag(playerSpawnTag)) return t;
             }
         }
 
+        // 2) Fallback: jméno
         foreach (var root in scene.GetRootGameObjects())
         {
             if (!string.IsNullOrEmpty(playerStartName))
             {
                 if (root.name == playerStartName) return root.transform;
                 var named = root.GetComponentsInChildren<Transform>(true);
-                foreach (var t in named)
-                    if (t.name == playerStartName) return t;
+                foreach (var t in named) if (t.name == playerStartName) return t;
             }
         }
 
         return null;
     }
 
+    // === Camera helpers ===
     void SetBootstrapCameraActive(bool on)
     {
         TryCacheBootstrapCameraAndAudio();

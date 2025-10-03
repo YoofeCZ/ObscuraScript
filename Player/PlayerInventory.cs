@@ -44,6 +44,43 @@ namespace Obscurus.Player
         [Serializable] private class WeaponEntry { public string itemId; }
         [Header("Zbraně (vlastněné)")]
         [SerializeField] private List<WeaponEntry> weaponEntries = new();
+        
+        // === HARD RESET CELÉHO INVENTÁŘE ===
+        [ContextMenu("Reset All (Zero)")]
+        public void ResetAll(bool silent = false)
+        {
+            // 1) Zdroje na nulu
+            resources = new ResourceState(); // vše 0
+
+            // 2) Munice na nulu
+            _ammo.Clear();
+            ammoPairs.Clear();
+
+            // 3) Zbraně pryč
+            weaponEntries.Clear();
+
+            if (!silent) NotifyChanged();
+        }
+
+        // (volitelné – granularita, může se hodit později)
+        public void ResetResources(bool silent = false)
+        {
+            resources = new ResourceState();
+            if (!silent) NotifyChanged();
+        }
+
+        public void ResetAmmo(bool silent = false)
+        {
+            _ammo.Clear();
+            ammoPairs.Clear();
+            if (!silent) NotifyChanged();
+        }
+
+        public void ResetWeapons(bool silent = false)
+        {
+            weaponEntries.Clear();
+            if (!silent) NotifyChanged();
+        }
 
         // === Event pro UI / systémy ===
         public event Action Changed;

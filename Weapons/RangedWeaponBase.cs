@@ -218,6 +218,21 @@ namespace Obscurus.Weapons
             bool v = force ?? IsVisuallyLoaded();
             animator.SetBool(loadedParam, v);
         }
+        
+        // uvnitř RangedWeaponBase
+        // Nastaví aktuální počet nábojů v zásobníku a notifikuje HUD/animator.
+        public void SetMagazine(int count, bool notify = true)
+        {
+            // správná interní proměnná a limit
+            _inMagazine = Mathf.Clamp(count, 0, MagazineSize);
+
+            // aktualizuj vizuální „Loaded“ stav (pokud to zbraň používá)
+            UpdateLoadedVisual();
+
+            // pošli event do HUDu
+            if (notify) RaiseAmmoChanged();
+        }
+
 
         public virtual void OnEquip(WeaponHolder holder)
         {

@@ -301,6 +301,16 @@ public class PlayerController : MonoBehaviour
             }
         }
     }
+    
+    public void SetLookAngles(float yaw, float pitch)
+    {
+        this.yaw = yaw;
+        // respektovat clamping
+        this.pitch = Mathf.Clamp(pitch, pitchMin, pitchMax);
+        // ihned aplikovat na transformy
+        transform.rotation = Quaternion.Euler(0f, this.yaw, 0f);
+        if (cameraPivot) cameraPivot.localRotation = Quaternion.Euler(this.pitch, 0f, 0f);
+    }
 
     void ReadInput(out Vector2 move, out Vector2 look, out bool jump, out bool sprint, out bool crouchToggle)
     {

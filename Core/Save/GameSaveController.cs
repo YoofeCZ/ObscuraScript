@@ -1,21 +1,28 @@
+// Assets/Obscurus/Scripts/Core/Save/GameSaveController.cs
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
-using AASave;              // namespace nového assetu
+using UnityEngine.SceneManagement;
+using AASave;              // AA Save & Load System
 using Obscurus.Items;
 using Obscurus.Player;
+using Obscurus.UI;        // kvůli WeaponCarouselUI (fallback na DB)
+using Obscurus.Weapons; 
 
 namespace Obscurus.Save
 {
     /// <summary>
-    /// Ukládá a načítá všechna potřebná data hráče pomocí AA Save & Load Systemu.
-    /// Sloty (1–3) řešíme prefixem klíčů (S{slot}_KeyName).
+    /// Ukládá/načítá data hráče přes AA Save & Load.
+    /// - Automaticky si najde runtime reference po spawnnutí hráče (OnPlayerSpawned).
+    /// - Ukládá i směr pohledu (yaw/pitch) + NÁZEV LEVELU (pro bootstrap→level workflow).
+    /// - ItemDatabase nastav ručně (nebo se vezme z WeaponCarouselUI.database).
+    /// - Sloty (1–3) řeší prefix S{slot}_KeyName.
     /// </summary>
     [DisallowMultipleComponent]
     public class GameSaveController : MonoBehaviour
     {
-        [Header("Reference na komponenty")]
+        [Header("Reference (můžou zůstat prázdné – najdou se automaticky)")]
         public SaveSystem saveSystem;
         public Transform playerTransform;
         public HealthSystem healthSystem;
@@ -23,202 +30,226 @@ namespace Obscurus.Save
         public StaminaSystem staminaSystem;
         public PlayerInventory playerInventory;
         public AlchemyPerks alchemyPerks;
-        public WeaponUpgradeService weaponUpgradeService;
-        public ItemDatabase itemDatabase;
         public WeaponHolder weaponHolder;
 
-        [SerializeField] private int currentSlot = 1;   // výchozí slot
+        [Tooltip("CENTRÁLNÍ databáze itemů (ScriptableObject). Nastav ručně. Když je prázdné, vezme se z WeaponCarouselUI.database.")]
+        public ItemDatabase itemDatabase;
 
-        /// <summary>
-        /// Označuje, zda se spouští nová hra.  Resetuje se při načtení slotu.
-        /// </summary>
+        [Header("Upgrade provider (volitelné)")]
+        [Tooltip("Přetáhni sem GameObject s WeaponUpgradeService NEBO s WeaponCarouselUI (kvůli DB).")]
+        [SerializeField] private Component upgradeProvider;
+        private WeaponUpgradeService weaponUpgradeService; // pokud existuje
+        private WeaponCarouselUI weaponCarouselUI;         // kvůli fallback DB
+
+        [Header("Slot")]
+        [SerializeField] private int currentSlot = 1;
+
+        /// <summary>Flag pro GameManager při startu nové hry (reset statů při spawnování).</summary>
         public static bool IsNewGame { get; set; } = true;
 
+        // kamera/head pro ukládání pitch
+        Transform _lookTransform;
+
+        // odložená aplikace savu po přepnutí levelu
+        bool _applyOnNextSpawn;
+        int  _applySlotVersion;
+
+        // ===== lifecycle =====
         void Awake()
         {
             SetSlot(currentSlot);
+            TryFindSaveSystem();
+            CacheUpgradeProvider(upgradeProvider);
         }
 
-        /// <summary>
-        /// Pomocná funkce pro prefixování klíčů podle slotu (S1_, S2_, S3_).
-        /// </summary>
+        void OnEnable()
+        {
+            GameManager.OnPlayerSpawned   += HandlePlayerSpawned;
+            GameManager.OnPlayerDespawned += HandlePlayerDespawned;
+
+            var gm = GameManager.I;
+            if (gm && gm.CurrentPlayer) HandlePlayerSpawned(gm.CurrentPlayer);
+            else TryGlobalAutoBind();
+        }
+
+        void OnDisable()
+        {
+            GameManager.OnPlayerSpawned   -= HandlePlayerSpawned;
+            GameManager.OnPlayerDespawned -= HandlePlayerDespawned;
+        }
+
+        void OnValidate() => CacheUpgradeProvider(upgradeProvider);
+
+        // === eventy ===
+        void HandlePlayerSpawned(GameObject playerGo)
+        {
+            if (!playerGo) return;
+
+            AutoWireFrom(playerGo);
+
+            // pokud čekáme na přepnutí levelu → teď aplikuj load
+            if (_applyOnNextSpawn && _applySlotVersion == currentSlot)
+            {
+                _applyOnNextSpawn = false;
+                // malá prodleva – nech UI/Addressables dožít
+                StartCoroutine(WaitAndApplyAfterSpawn());
+            }
+        }
+
+        System.Collections.IEnumerator WaitAndApplyAfterSpawn()
+        {
+            yield return null; // jeden frame
+            LoadGame_ApplyToCurrentPlayer();
+        }
+
+        void HandlePlayerDespawned()
+        {
+            // reference nechávám – při dalším spawnu se přepíšou
+        }
+
+        /// <summary>Naváže komponenty z hráče a dohledá ostatní ve scéně.</summary>
+        public void AutoWireFrom(GameObject playerGo)
+        {
+            if (!playerGo) return;
+
+            TryFindSaveSystem();
+
+            // 1) věci přímo u Playera
+            playerTransform = playerGo.transform;
+            healthSystem    = FindOnSelfOrChildren<HealthSystem>(playerGo);
+            armorSystem     = FindOnSelfOrChildren<ArmorSystem>(playerGo);
+            staminaSystem   = FindOnSelfOrChildren<StaminaSystem>(playerGo);
+            weaponHolder    = FindOnSelfOrChildren<WeaponHolder>(playerGo);
+
+            // 2) věci mimo playera (ve scéně)
+            if (!playerInventory) playerInventory = FindComponentInScene<PlayerInventory>();
+            if (!alchemyPerks)    alchemyPerks    = FindComponentInScene<AlchemyPerks>();
+
+            // 3) upgrade provider (jen pokud ho používáš)
+            if (!weaponUpgradeService) weaponUpgradeService = FindComponentInScene<WeaponUpgradeService>();
+            if (!weaponCarouselUI)     weaponCarouselUI     = FindComponentInScene<WeaponCarouselUI>();
+
+            // 4) kamera/head pro pitch
+            _lookTransform = FindPlayerLook(playerTransform);
+
+            // 5) ItemDatabase fallback z carouselu
+            if (!itemDatabase && weaponCarouselUI) itemDatabase = weaponCarouselUI.database;
+        }
+
+        /// <summary>Fallback, když CurrentPlayer neexistuje.</summary>
+        void TryGlobalAutoBind()
+        {
+            TryFindSaveSystem();
+
+            var tagged = GameObject.FindWithTag("Player");
+            if (tagged) { AutoWireFrom(tagged); return; }
+
+            healthSystem    = FindComponentInScene<HealthSystem>();
+            armorSystem     = FindComponentInScene<ArmorSystem>();
+            staminaSystem   = FindComponentInScene<StaminaSystem>();
+            playerInventory = FindComponentInScene<PlayerInventory>();
+            alchemyPerks    = FindComponentInScene<AlchemyPerks>();
+            weaponHolder    = FindComponentInScene<WeaponHolder>();
+
+            if (!weaponUpgradeService) weaponUpgradeService = FindComponentInScene<WeaponUpgradeService>();
+            if (!weaponCarouselUI)     weaponCarouselUI     = FindComponentInScene<WeaponCarouselUI>();
+            if (!itemDatabase && weaponCarouselUI) itemDatabase = weaponCarouselUI.database;
+
+            if (!playerTransform)
+            {
+                if (weaponHolder)         playerTransform = weaponHolder.transform.root;
+                else if (playerInventory) playerTransform = playerInventory.transform.root;
+                else if (healthSystem)    playerTransform = healthSystem.transform.root;
+            }
+            _lookTransform = FindPlayerLook(playerTransform);
+        }
+
+        void TryFindSaveSystem()
+        {
+            if (saveSystem) return;
+#if UNITY_2022_2_OR_NEWER
+            saveSystem = UnityEngine.Object.FindFirstObjectByType<SaveSystem>(FindObjectsInactive.Include);
+#else
+            var all = Resources.FindObjectsOfTypeAll<SaveSystem>();
+            foreach (var s in all)
+            {
+                if (!s) continue;
+                var go = s.gameObject;
+                if (go && go.scene.IsValid() && (go.hideFlags & HideFlags.HideInHierarchy) == 0)
+                { saveSystem = s; break; }
+            }
+#endif
+            if (!saveSystem)
+                Debug.LogWarning("[GameSaveController] SaveSystem nenalezen – uložení/načtení nepojede, dokud nebude SaveSystem ve scéně.");
+        }
+
+        // === helpers ===
+        static T FindOnSelfOrChildren<T>(GameObject go) where T : Component
+        {
+            var c = go.GetComponent<T>();
+            return c ? c : go.GetComponentInChildren<T>(true);
+        }
+
+        static T FindComponentInScene<T>() where T : Component
+        {
+#if UNITY_2022_2_OR_NEWER
+            return UnityEngine.Object.FindFirstObjectByType<T>(FindObjectsInactive.Include);
+#else
+            var all = Resources.FindObjectsOfTypeAll<T>();
+            foreach (var c in all)
+            {
+                if (!c) continue;
+                var go = c.gameObject;
+                if (go && go.scene.IsValid() && (go.hideFlags & HideFlags.HideInHierarchy) == 0)
+                    return c;
+            }
+            return null;
+#endif
+        }
+
+        void CacheUpgradeProvider(Component c)
+        {
+            if (!c) return;
+            weaponUpgradeService = c as WeaponUpgradeService ?? c.GetComponent<WeaponUpgradeService>();
+            weaponCarouselUI     = c as WeaponCarouselUI     ?? c.GetComponent<WeaponCarouselUI>();
+            if (!itemDatabase && weaponCarouselUI) itemDatabase = weaponCarouselUI.database;
+        }
+
+        static Transform FindPlayerLook(Transform playerRoot)
+        {
+            if (!playerRoot) return null;
+
+            // Hledej CameraPivot prioritně
+            foreach (var t in playerRoot.GetComponentsInChildren<Transform>(true))
+            {
+                var n = t.name.ToLowerInvariant();
+                if (n.Contains("pivot"))   // <--- přidáno
+                    return t;
+            }
+
+            // fallback na samotnou kameru
+            var cam = playerRoot.GetComponentInChildren<Camera>(true);
+            if (cam) return cam.transform;
+
+            if (Camera.main && Camera.main.transform.IsChildOf(playerRoot))
+                return Camera.main.transform;
+
+            foreach (var t in playerRoot.GetComponentsInChildren<Transform>(true))
+            {
+                var n = t.name.ToLowerInvariant();
+                if (n.Contains("camera") || n.Contains("head") || n.Contains("look") || n.Contains("view"))
+                    return t;
+            }
+            return null;
+        }
+
+
+        ItemDatabase EffectiveDB => itemDatabase ? itemDatabase : (weaponCarouselUI ? weaponCarouselUI.database : null);
+
+        // ===== Slot API =====
+        public void SetSlot(int slot) => currentSlot = Mathf.Clamp(slot, 1, 3);
         private string K(string key) => $"S{currentSlot}_{key}";
 
-        /// <summary>
-        /// Nastaví slot (1–3).
-        /// </summary>
-        public void SetSlot(int slot)
-        {
-            currentSlot = Mathf.Clamp(slot, 1, 3);
-        }
-
-        /// <summary>Uloží veškerá data do aktuálního slotu.</summary>
-        public void SaveGame()
-        {
-            if (saveSystem == null || playerTransform == null) return;
-
-            // pozice a rotace (Euler)
-            saveSystem.Save(K("PlayerPos"), playerTransform.position);
-            saveSystem.Save(K("PlayerRot"), playerTransform.eulerAngles);
-
-            // životy, brnění, stamina
-            if (healthSystem  != null) saveSystem.Save(K("PlayerHP"),      healthSystem.Current);
-            if (armorSystem   != null) saveSystem.Save(K("PlayerArmor"),   armorSystem.Current);
-            if (staminaSystem != null) saveSystem.Save(K("PlayerStamina"), staminaSystem.Current);
-
-            // suroviny a zbraně
-            if (playerInventory != null)
-            {
-                foreach (ResourceKey key in Enum.GetValues(typeof(ResourceKey)))
-                    saveSystem.Save(K($"Res_{key}"), playerInventory.GetResource(key));
-
-                saveSystem.Save(K("OwnedWeaponIds"), playerInventory.GetOwnedWeaponIds().ToArray());
-
-                // rezervy munice (pouze klíče s nenulovým množstvím)
-                if (itemDatabase != null)
-                {
-                    var keys   = new List<string>();
-                    var counts = new List<int>();
-                    foreach (var ammo in itemDatabase.GetAllAmmo())
-                    {
-                        var key = ammo?.ammo?.ammoKey;
-                        if (string.IsNullOrEmpty(key)) continue;
-                        int count = playerInventory.GetAmmoReserve(key);
-                        if (count > 0) { keys.Add(key); counts.Add(count); }
-                    }
-                    saveSystem.Save(K("AmmoKeys"),   keys.ToArray());
-                    saveSystem.Save(K("AmmoCounts"), counts.ToArray()); // int[]
-                }
-            }
-
-            // odemčené perky → pole intů
-            if (alchemyPerks != null)
-            {
-                var list = new List<int>();
-                foreach (PerkId pid in Enum.GetValues(typeof(PerkId)))
-                    if (alchemyPerks.IsUnlocked(pid)) list.Add((int)pid);
-                saveSystem.Save(K("UnlockedPerkIds"), list.ToArray()); // int[]
-            }
-
-            // upgrady zbraní
-            if (weaponUpgradeService != null && playerInventory != null)
-            {
-                var ids      = new List<string>();
-                var tiers    = new List<int>();
-                var runes    = new List<int>();
-                foreach (var wid in playerInventory.GetOwnedWeaponIds())
-                {
-                    var def = itemDatabase?.FindById(wid);
-                    var st  = weaponUpgradeService.GetState(def);
-                    if (st == null) continue;
-                    ids.Add(wid);
-                    tiers.Add(st.damageTiers);
-                    runes.Add(st.vitriolRune ? 1 : 0);
-                }
-                saveSystem.Save(K("UpgradeWeaponIds"),   ids.ToArray());   // string[]
-                saveSystem.Save(K("UpgradeDamageTiers"), tiers.ToArray()); // int[]
-                saveSystem.Save(K("UpgradeVitriolRune"), runes.ToArray()); // int[]
-            }
-
-            // aktuálně vybavená zbraň
-            string currentId = (weaponHolder != null && weaponHolder.Current != null && weaponHolder.Current.Definition != null)
-                             ? weaponHolder.Current.Definition.Id : string.Empty;
-            saveSystem.Save(K("CurrentWeaponId"), currentId);
-        }
-
-        /// <summary>Načte data z aktuálního slotu.</summary>
-        public void LoadGame()
-        {
-            if (saveSystem == null || playerTransform == null) return;
-
-            // pozice a rotace
-            Vector3 pos = saveSystem.Load(K("PlayerPos"), playerTransform.position);
-            Vector3 rot = saveSystem.Load(K("PlayerRot"), playerTransform.eulerAngles);
-            playerTransform.position    = pos;
-            playerTransform.eulerAngles = rot;
-
-            // HP, Armor, Stamina
-            if (healthSystem  != null) healthSystem.Refill(saveSystem.Load(K("PlayerHP"),      healthSystem.Current));
-            if (armorSystem   != null) armorSystem.Refill(saveSystem.Load(K("PlayerArmor"),    armorSystem.Current));
-            if (staminaSystem != null) staminaSystem.Refill(saveSystem.Load(K("PlayerStamina"), staminaSystem.Current));
-
-            // suroviny, zbraně, munice
-            if (playerInventory != null)
-            {
-                foreach (ResourceKey key in Enum.GetValues(typeof(ResourceKey)))
-                {
-                    int current = playerInventory.GetResource(key);
-                    int target  = saveSystem.Load(K($"Res_{key}"), current);
-                    int diff = target - current;
-                    if (diff > 0) playerInventory.AddResource(key, diff);
-                    else if (diff < 0) playerInventory.SpendResource(key, -diff);
-                }
-
-                // seznam vlastněných zbraní – načtení pole stringů
-                var savedOwned = saveSystem.LoadArray(K("OwnedWeaponIds"), new string[0]).AsStringArray();
-                var currentOwned = playerInventory.GetOwnedWeaponIds().ToList();
-                foreach (var wid in currentOwned)
-                    if (!savedOwned.Contains(wid)) playerInventory.RemoveWeapon(itemDatabase.FindById(wid));
-                foreach (var wid in savedOwned)
-                    if (!currentOwned.Contains(wid)) playerInventory.AddWeapon(itemDatabase.FindById(wid));
-
-                // rezervy munice
-                var ammoKeys   = saveSystem.LoadArray(K("AmmoKeys"),   new string[0]).AsStringArray();
-                var ammoCounts = saveSystem.LoadArray(K("AmmoCounts"), new int[0]); // ← žádné .AsIntArray()
-                for (int i = 0; i < ammoKeys.Length && i < ammoCounts.Length; i++)
-                {
-                    string key = ammoKeys[i];
-                    int target = ammoCounts[i];
-                    int current = playerInventory.GetAmmoReserve(key);
-                    int diff = target - current;
-                    if (diff > 0) playerInventory.AddAmmo(key, diff);
-                    else if (diff < 0) playerInventory.TakeAmmo(key, -diff);
-                }
-            }
-
-            // perky
-            if (alchemyPerks != null)
-            {
-                foreach (PerkId pid in Enum.GetValues(typeof(PerkId)))
-                    alchemyPerks.SetUnlocked(pid, false);
-
-                var ids = saveSystem.LoadArray(K("UnlockedPerkIds"), new int[0]); // ← žádné .AsIntArray()
-                foreach (var v in ids)
-                    if (Enum.IsDefined(typeof(PerkId), v))
-                        alchemyPerks.SetUnlocked((PerkId)v, true);
-            }
-
-            // upgrady zbraní
-            if (weaponUpgradeService != null && playerInventory != null)
-            {
-                var ids   = saveSystem.LoadArray(K("UpgradeWeaponIds"),   new string[0]).AsStringArray();
-                var tiers = saveSystem.LoadArray(K("UpgradeDamageTiers"), new int[0]); // ← int[]
-                var runes = saveSystem.LoadArray(K("UpgradeVitriolRune"), new int[0]); // ← int[]
-                for (int i = 0; i < ids.Length && i < tiers.Length && i < runes.Length; i++)
-                {
-                    var def = itemDatabase?.FindById(ids[i]);
-                    var st  = weaponUpgradeService.GetState(def);
-                    if (st != null)
-                    {
-                        st.damageTiers = tiers[i];
-                        st.vitriolRune = runes[i] != 0;
-                    }
-                }
-            }
-
-            // aktuálně vybavená zbraň
-            if (weaponHolder != null)
-            {
-                var id = saveSystem.Load(K("CurrentWeaponId"), string.Empty);
-                if (!string.IsNullOrEmpty(id) && itemDatabase != null)
-                {
-                    var def = itemDatabase.FindById(id);
-                    if (def != null) weaponHolder.EquipByDefinition(def);
-                }
-            }
-        }
-
-        // === Slot API ===
         public void SaveSlot(int slot)
         {
             SetSlot(slot);
@@ -229,20 +260,32 @@ namespace Obscurus.Save
         public void LoadSlot(int slot)
         {
             SetSlot(slot);
-            LoadGame();
+            IsNewGame = false; // aby GameManager při spawnu neresetoval staty
+            if (!playerTransform) TryGlobalAutoBind();
+            LoadGame(); // tohle případně přepne level a zbytek aplikuje po spawnu
         }
 
         public void DeleteSlot(int slot)
         {
             SetSlot(slot);
-            if (saveSystem == null) return;
+            if (saveSystem == null) { TryFindSaveSystem(); if (saveSystem == null) return; }
 
-            // Přepsání známých klíčů "prázdnou" hodnotou:
+            // level + pozice + pohled
+            saveSystem.Save(K("Level"), string.Empty);
             saveSystem.Save(K("PlayerPos"), Vector3.zero);
             saveSystem.Save(K("PlayerRot"), Vector3.zero);
-            saveSystem.Save(K("PlayerHP"), 0);
-            saveSystem.Save(K("PlayerArmor"), 0);
-            saveSystem.Save(K("PlayerStamina"), 0);
+            saveSystem.Save(K("LookYaw"),   0f);
+            saveSystem.Save(K("LookPitch"), 0f);
+
+            // staty
+            saveSystem.Save(K("PlayerHP"), 0f);
+            saveSystem.Save(K("PlayerHP_Max"), 0f);
+            saveSystem.Save(K("PlayerArmor"), 0f);
+            saveSystem.Save(K("PlayerArmor_Max"), 0f);
+            saveSystem.Save(K("PlayerStamina"), 0f);
+            saveSystem.Save(K("PlayerStamina_Max"), 0f);
+
+            // inventář
             saveSystem.Save(K("OwnedWeaponIds"), Array.Empty<string>());
             saveSystem.Save(K("AmmoKeys"), Array.Empty<string>());
             saveSystem.Save(K("AmmoCounts"), Array.Empty<int>());
@@ -252,7 +295,6 @@ namespace Obscurus.Save
             saveSystem.Save(K("UpgradeVitriolRune"), Array.Empty<int>());
             saveSystem.Save(K("CurrentWeaponId"), string.Empty);
 
-            // Suroviny: vynulovat všechny ResourceKey
             foreach (ResourceKey key in Enum.GetValues(typeof(ResourceKey)))
                 saveSystem.Save(K($"Res_{key}"), 0);
         }
@@ -260,7 +302,371 @@ namespace Obscurus.Save
         public string SlotSummary(int slot)
         {
             SetSlot(slot);
-            return saveSystem.DoesDataExists(K("PlayerPos")) ? "Saved" : "Empty";
+            if (saveSystem == null) TryFindSaveSystem();
+            return (saveSystem != null && saveSystem.DoesDataExists(K("PlayerPos"))) ? "Saved" : "Empty";
+        }
+
+        // ===== Save / Load =====
+        public void SaveGame()
+        {
+            if (saveSystem == null) TryFindSaveSystem();
+            if (saveSystem == null || playerTransform == null) return;
+
+            // LEVEL (pro _Bootstrap→level model)
+            string level =
+                (GameManager.I != null && !string.IsNullOrEmpty(GameManager.I.CurrentLevel))
+                ? GameManager.I.CurrentLevel
+                : SceneManager.GetActiveScene().name;
+            saveSystem.Save(K("Level"), level);
+
+            // pozice + pohled (yaw/pitch)
+            saveSystem.Save(K("PlayerPos"), playerTransform.position);
+
+            float yaw = playerTransform.eulerAngles.y;
+            if (!_lookTransform) _lookTransform = FindPlayerLook(playerTransform);
+
+// Ulož pitch normalizovaný na -180…+180
+            float pitch = 0f;
+            if (_lookTransform)
+            {
+                pitch = _lookTransform.localEulerAngles.x;
+                if (pitch > 180f) pitch -= 360f;  // převede 350° na -10°
+            }
+
+            saveSystem.Save(K("LookYaw"), yaw);
+            saveSystem.Save(K("LookPitch"), pitch);
+
+
+            // pro kompatibilitu ukládám i celou rotaci
+            saveSystem.Save(K("PlayerRot"), playerTransform.eulerAngles);
+
+            // staty
+            if (healthSystem != null) {
+                saveSystem.Save(K("PlayerHP"), healthSystem.Current);
+                saveSystem.Save(K("PlayerHP_Max"), healthSystem.max);
+            }
+            if (armorSystem != null) {
+                saveSystem.Save(K("PlayerArmor"), armorSystem.Current);
+                saveSystem.Save(K("PlayerArmor_Max"), armorSystem.max);
+            }
+            if (staminaSystem != null) {
+                saveSystem.Save(K("PlayerStamina"), staminaSystem.Current);
+                saveSystem.Save(K("PlayerStamina_Max"), staminaSystem.max);
+            }
+
+            // inventář
+            if (playerInventory != null)
+            {
+                foreach (ResourceKey key in Enum.GetValues(typeof(ResourceKey)))
+                    saveSystem.Save(K($"Res_{key}"), playerInventory.GetResource(key));
+
+                saveSystem.Save(K("OwnedWeaponIds"), playerInventory.GetOwnedWeaponIds().ToArray());
+
+                // ammo → jen pokud známe seznam klíčů (DB)
+                var db = EffectiveDB;
+                if (db != null)
+                {
+                    var keys   = new List<string>();
+                    var counts = new List<int>();
+                    foreach (var ammo in db.GetAllAmmo())
+                    {
+                        var key = ammo?.ammo?.ammoKey;
+                        if (string.IsNullOrEmpty(key)) continue;
+                        int count = playerInventory.GetAmmoReserve(key);
+                        if (count > 0) { keys.Add(key); counts.Add(count); }
+                    }
+                    saveSystem.Save(K("AmmoKeys"),   keys.ToArray());
+                    saveSystem.Save(K("AmmoCounts"), counts.ToArray());
+                }
+            }
+
+            // perky
+            if (alchemyPerks != null)
+            {
+                var list = new List<int>();
+                foreach (PerkId pid in Enum.GetValues(typeof(PerkId)))
+                    if (alchemyPerks.IsUnlocked(pid)) list.Add((int)pid);
+                saveSystem.Save(K("UnlockedPerkIds"), list.ToArray());
+            }
+
+            // upgrady – jen pokud máš skutečný WeaponUpgradeService
+            if (weaponUpgradeService != null && playerInventory != null)
+            {
+                var db = EffectiveDB;
+                var ids   = new List<string>();
+                var tiers = new List<int>();
+                var runes = new List<int>();
+
+                foreach (var wid in playerInventory.GetOwnedWeaponIds())
+                {
+                    var def = db?.FindById(wid);
+                    var st  = weaponUpgradeService.GetState(def);
+                    if (st == null) continue;
+                    ids.Add(wid);
+                    tiers.Add(st.damageTiers);
+                    runes.Add(st.vitriolRune ? 1 : 0);
+                }
+
+                saveSystem.Save(K("UpgradeWeaponIds"),   ids.ToArray());
+                saveSystem.Save(K("UpgradeDamageTiers"), tiers.ToArray());
+                saveSystem.Save(K("UpgradeVitriolRune"), runes.ToArray());
+            }
+
+            // aktuálně vybavená zbraň
+            // aktuálně vybavená zbraň
+            string currentId =
+                (weaponHolder != null && weaponHolder.Current != null && weaponHolder.Current.Definition != null)
+                    ? weaponHolder.Current.Definition.Id : string.Empty;
+            saveSystem.Save(K("CurrentWeaponId"), currentId);
+
+// uložit i počet nábojů v zásobníku, pokud je to ranged zbraň
+            int inMag = 0;
+            if (weaponHolder != null && weaponHolder.Current is RangedWeaponBase rangedWeapon)
+            {
+                inMag = rangedWeapon.InMagazine;  // vlastnost InMagazine u RangedWeaponBase
+            }
+            saveSystem.Save(K("CurrentWeaponInMag"), inMag);
+
+        }
+
+        public void LoadGame()
+        {
+            if (saveSystem == null) TryFindSaveSystem();
+            if (saveSystem == null) return;
+
+            // 1) načti cílový LEVEL
+            string savedLevel = saveSystem.Load(K("Level"), string.Empty);
+
+            // aktuální level podle GameManageru (nebo aktivní scény)
+            string currentLevel =
+                (GameManager.I != null && !string.IsNullOrEmpty(GameManager.I.CurrentLevel))
+                ? GameManager.I.CurrentLevel
+                : SceneManager.GetActiveScene().name;
+
+            // 2) je potřeba přepnout scénu?
+            if (!string.IsNullOrEmpty(savedLevel) && !string.Equals(savedLevel, currentLevel, StringComparison.Ordinal))
+            {
+                // odlož aplikaci savu po spawnu v cílové scéně
+                _applyOnNextSpawn  = true;
+                _applySlotVersion  = currentSlot;
+
+                // zajisti, že budeme mít hráče po přepnutí
+                if (GameManager.I != null)
+                {
+                    GameManager.I.LoadLevel(savedLevel);
+                }
+                else
+                {
+                    // nouzově: načti scénu přímo (bez GameManageru)
+                    StartCoroutine(LoadSceneDirectThenApply(savedLevel));
+                }
+                return; // zbytek se aplikuje po spawnu
+            }
+
+            // 3) jsme už v cílovém levelu → aplikuj přímo
+            LoadGame_ApplyToCurrentPlayer();
+        }
+
+        System.Collections.IEnumerator LoadSceneDirectThenApply(string levelName)
+        {
+            // unload vše kromě _Bootstrap
+            for (int i = 0; i < SceneManager.sceneCount; i++)
+            {
+                var s = SceneManager.GetSceneAt(i);
+                if (s.name != "_Bootstrap")
+                {
+                    var u = SceneManager.UnloadSceneAsync(s);
+                    if (u != null) while (!u.isDone) yield return null;
+                }
+            }
+
+            var op = SceneManager.LoadSceneAsync(levelName, LoadSceneMode.Additive);
+            while (!op.isDone) yield return null;
+
+            var lvl = SceneManager.GetSceneByName(levelName);
+            if (lvl.IsValid()) SceneManager.SetActiveScene(lvl);
+
+            yield return null;
+            LoadGame_ApplyToCurrentPlayer();
+        }
+
+        void LoadGame_ApplyToCurrentPlayer()
+{
+    if (playerTransform == null) TryGlobalAutoBind();
+    if (playerTransform == null) return;
+
+    // pozice
+    Vector3 pos = saveSystem.Load(K("PlayerPos"), playerTransform.position);
+    playerTransform.position = pos;
+
+    // yaw/pitch
+    float yaw   = saveSystem.Load(K("LookYaw"),   playerTransform.eulerAngles.y);
+    float pitch = saveSystem.Load(K("LookPitch"), 0f);
+
+    // 1) zkus nastavit přímo PlayerControlleru, aby si přepsal své interní proměnné
+    var pc = playerTransform.GetComponent<PlayerController>();
+    if (pc != null)
+    {
+        pc.SetLookAngles(yaw, pitch);
+    }
+    else
+    {
+        // 2) fallback: přímo nastav transformy (když PlayerController není k dispozici)
+        var e = playerTransform.eulerAngles;
+        e.y = yaw;
+        playerTransform.eulerAngles = e;
+
+        if (!_lookTransform) _lookTransform = FindPlayerLook(playerTransform);
+        if (_lookTransform)
+        {
+            float pitch360 = (pitch < 0f) ? pitch + 360f : pitch;
+            var le = _lookTransform.localEulerAngles;
+            le.x = pitch360;
+            _lookTransform.localEulerAngles = le;
+        }
+    }
+
+    // načti ID vlastněných zbraní pro pozdější refresh WeaponHolderu
+    string[] savedOwnedIds = saveSystem.LoadArray(K("OwnedWeaponIds"), new string[0]).AsStringArray();
+
+    // staty
+    if (healthSystem != null) {
+        float savedMax = saveSystem.Load(K("PlayerHP_Max"), healthSystem.max);
+        healthSystem.SetMax(savedMax, keepRatio: false);
+        float savedCur = saveSystem.Load(K("PlayerHP"), healthSystem.Current);
+        healthSystem.Refill(savedCur);
+    }
+    if (armorSystem != null) {
+        float savedArmorMax = saveSystem.Load(K("PlayerArmor_Max"), armorSystem.max);
+        armorSystem.SetMax(savedArmorMax, keepRatio: false);
+        float savedArmorCur = saveSystem.Load(K("PlayerArmor"), armorSystem.Current);
+        armorSystem.Refill(savedArmorCur);
+    }
+    if (staminaSystem != null) {
+        float savedStamMax = saveSystem.Load(K("PlayerStamina_Max"), staminaSystem.max);
+        staminaSystem.SetMax(savedStamMax, keepRatio: false);
+        float savedStamCur = saveSystem.Load(K("PlayerStamina"), staminaSystem.Current);
+        staminaSystem.Refill(savedStamCur);
+    }
+
+    // inventář – upraví zdroje, munici, vlastněné zbraně
+    if (playerInventory != null)
+    {
+        foreach (ResourceKey key in Enum.GetValues(typeof(ResourceKey)))
+        {
+            int current = playerInventory.GetResource(key);
+            int target  = saveSystem.Load(K($"Res_{key}"), current);
+            int diff = target - current;
+            if (diff > 0) playerInventory.AddResource(key, diff);
+            else if (diff < 0) playerInventory.SpendResource(key, -diff);
+        }
+
+        var db = EffectiveDB;
+        var savedOwned = savedOwnedIds;               // použij předem načtená ID zbraní
+        var currentOwned = playerInventory.GetOwnedWeaponIds().ToList();
+        foreach (var wid in currentOwned)
+            if (!savedOwned.Contains(wid)) playerInventory.RemoveWeapon(db?.FindById(wid));
+        foreach (var wid in savedOwned)
+            if (!currentOwned.Contains(wid)) playerInventory.AddWeapon(db?.FindById(wid));
+
+        if (db != null)
+        {
+            var ammoKeys   = saveSystem.LoadArray(K("AmmoKeys"),   new string[0]).AsStringArray();
+            var ammoCounts = saveSystem.LoadArray(K("AmmoCounts"), new int[0]);
+            for (int i = 0; i < ammoKeys.Length && i < ammoCounts.Length; i++)
+            {
+                string key = ammoKeys[i];
+                int target = ammoCounts[i];
+                int current = playerInventory.GetAmmoReserve(key);
+                int diff = target - current;
+                if (diff > 0) playerInventory.AddAmmo(key, diff);
+                else if (diff < 0) playerInventory.TakeAmmo(key, -diff);
+            }
+        }
+    }
+
+    // odemkni zbraně v WeaponHolderu podle uložených vlastněných ID
+    // aktuální zbraň – nyní po odemčení slotů funguje EquipByDefinition správně
+    if (weaponHolder != null)
+    {
+        var db = EffectiveDB;
+        string currentId = saveSystem.Load(K("CurrentWeaponId"), string.Empty);
+        if (!string.IsNullOrEmpty(currentId) && db != null)
+        {
+            var def = db.FindById(currentId);
+            if (def != null)
+            {
+                weaponHolder.EquipByDefinition(def);
+    
+                // načíst a nastavit počet nábojů v zásobníku pro tuto zbraň
+                int savedInMag = saveSystem.Load(K("CurrentWeaponInMag"), 0);
+                if (weaponHolder.Current is RangedWeaponBase rangedWeapon)
+                {
+                    // Tuto metodu je potřeba přidat do RangedWeaponBase (viz níže)
+                    rangedWeapon.SetMagazine(savedInMag);
+                }
+            }
+        }
+    }
+
+
+    // perky
+    if (alchemyPerks != null)
+    {
+        foreach (PerkId pid in Enum.GetValues(typeof(PerkId)))
+            alchemyPerks.SetUnlocked(pid, false);
+
+        var ids = saveSystem.LoadArray(K("UnlockedPerkIds"), new int[0]);
+        foreach (var v in ids)
+            if (Enum.IsDefined(typeof(PerkId), v))
+                alchemyPerks.SetUnlocked((PerkId)v, true);
+    }
+
+    // upgrady
+    if (weaponUpgradeService != null && playerInventory != null)
+    {
+        var db = EffectiveDB;
+        var ids   = saveSystem.LoadArray(K("UpgradeWeaponIds"),   new string[0]).AsStringArray();
+        var tiers = saveSystem.LoadArray(K("UpgradeDamageTiers"), new int[0]);
+        var runes = saveSystem.LoadArray(K("UpgradeVitriolRune"), new int[0]);
+        for (int i = 0; i < ids.Length && i < tiers.Length && i < runes.Length; i++)
+        {
+            var def = db?.FindById(ids[i]);
+            var st  = weaponUpgradeService.GetState(def);
+            if (st != null)
+            {
+                st.damageTiers = tiers[i];
+                st.vitriolRune = runes[i] != 0;
+            }
+        }
+    }
+
+    // aktuální zbraň – nyní po odemčení slotů funguje EquipByDefinition správně
+    if (weaponHolder != null)
+    {
+        var db = EffectiveDB;
+        string currentId = saveSystem.Load(K("CurrentWeaponId"), string.Empty);
+        if (!string.IsNullOrEmpty(currentId) && db != null)
+        {
+            var def = db.FindById(currentId);
+            if (def != null) weaponHolder.EquipByDefinition(def);
+        }
+    }
+}
+
+
+    }
+
+    // --- drobný pomocník pro AA Save pole stringů ---
+    internal static class SaveArrayExtensions
+    {
+        public static string[] AsStringArray(this Array a)
+        {
+            if (a == null) return new string[0];
+            var arr = new string[a.Length];
+            for (int i = 0; i < a.Length; i++)
+                arr[i] = a.GetValue(i)?.ToString() ?? string.Empty;
+            return arr;
         }
     }
 }
