@@ -493,17 +493,16 @@ namespace Obscurus.Save
         void LoadGame_ApplyToCurrentPlayer()
 {
     if (playerTransform == null) TryGlobalAutoBind();
-    if (playerTransform == null) return;
+    if (playerTransform == null || saveSystem == null) return;
 
-    // pozice
+    // --- pozice ---
     Vector3 pos = saveSystem.Load(K("PlayerPos"), playerTransform.position);
     playerTransform.position = pos;
 
-    // yaw/pitch
+    // --- yaw/pitch ---
     float yaw   = saveSystem.Load(K("LookYaw"),   playerTransform.eulerAngles.y);
     float pitch = saveSystem.Load(K("LookPitch"), 0f);
 
-    // 1) zkus nastavit přímo PlayerControlleru, aby si přepsal své interní proměnné
     var pc = playerTransform.GetComponent<PlayerController>();
     if (pc != null)
     {
@@ -511,64 +510,38 @@ namespace Obscurus.Save
     }
     else
     {
-        // 2) fallback: přímo nastav transformy (když PlayerController není k dispozici)
-        var e = playerTransform.eulerAngles;
-        e.y = yaw;
-        playerTransform.eulerAngles = e;
-
+        var e = playerTransform.eulerAngles; e.y = yaw; playerTransform.eulerAngles = e;
         if (!_lookTransform) _lookTransform = FindPlayerLook(playerTransform);
         if (_lookTransform)
         {
             float pitch360 = (pitch < 0f) ? pitch + 360f : pitch;
-            var le = _lookTransform.localEulerAngles;
-            le.x = pitch360;
-            _lookTransform.localEulerAngles = le;
+            var le = _lookTransform.localEulerAngles; le.x = pitch360; _lookTransform.localEulerAngles = le;
         }
     }
 
-    // načti ID vlastněných zbraní pro pozdější refresh WeaponHolderu
-    string[] savedOwnedIds = saveSystem.LoadArray(K("OwnedWeaponIds"), new string[0]).AsStringArray();
-
-    // staty
-    if (healthSystem != null) {
-        float savedMax = saveSystem.Load(K("PlayerHP_Max"), healthSystem.max);
-        healthSystem.SetMax(savedMax, keepRatio: false);
-        float savedCur = saveSystem.Load(K("PlayerHP"), healthSystem.Current);
-        healthSystem.Refill(savedCur);
-    }
-    if (armorSystem != null) {
-        float savedArmorMax = saveSystem.Load(K("PlayerArmor_Max"), armorSystem.max);
-        armorSystem.SetMax(savedArmorMax, keepRatio: false);
-        float savedArmorCur = saveSystem.Load(K("PlayerArmor"), armorSystem.Current);
-        armorSystem.Refill(savedArmorCur);
-    }
-    if (staminaSystem != null) {
-        float savedStamMax = saveSystem.Load(K("PlayerStamina_Max"), staminaSystem.max);
-        staminaSystem.SetMax(savedStamMax, keepRatio: false);
-        float savedStamCur = saveSystem.Load(K("PlayerStamina"), staminaSystem.Current);
-        staminaSystem.Refill(savedStamCur);
-    }
-
-    // inventář – upraví zdroje, munici, vlastněné zbraně
+    // --- inventář (resources, ammo, owned weapons) ---
     if (playerInventory != null)
     {
         foreach (ResourceKey key in Enum.GetValues(typeof(ResourceKey)))
         {
-            int current = playerInventory.GetResource(key);
-            int target  = saveSystem.Load(K($"Res_{key}"), current);
-            int diff = target - current;
+            int cur = playerInventory.GetResource(key);
+            int tgt = saveSystem.Load(K($"Res_{key}"), cur);
+            int diff = tgt - cur;
             if (diff > 0) playerInventory.AddResource(key, diff);
             else if (diff < 0) playerInventory.SpendResource(key, -diff);
         }
 
         var db = EffectiveDB;
-        var savedOwned = savedOwnedIds;               // použij předem načtená ID zbraní
+        string[] savedOwnedIds = saveSystem.LoadArray(K("OwnedWeaponIds"), new string[0]).AsStringArray();
+
+        // sync vlastněných zbraní
         var currentOwned = playerInventory.GetOwnedWeaponIds().ToList();
         foreach (var wid in currentOwned)
-            if (!savedOwned.Contains(wid)) playerInventory.RemoveWeapon(db?.FindById(wid));
-        foreach (var wid in savedOwned)
+            if (!savedOwnedIds.Contains(wid)) playerInventory.RemoveWeapon(db?.FindById(wid));
+        foreach (var wid in savedOwnedIds)
             if (!currentOwned.Contains(wid)) playerInventory.AddWeapon(db?.FindById(wid));
 
+        // ammo
         if (db != null)
         {
             var ammoKeys   = saveSystem.LoadArray(K("AmmoKeys"),   new string[0]).AsStringArray();
@@ -576,53 +549,27 @@ namespace Obscurus.Save
             for (int i = 0; i < ammoKeys.Length && i < ammoCounts.Length; i++)
             {
                 string key = ammoKeys[i];
-                int target = ammoCounts[i];
-                int current = playerInventory.GetAmmoReserve(key);
-                int diff = target - current;
+                int tgt = ammoCounts[i];
+                int cur = playerInventory.GetAmmoReserve(key);
+                int diff = tgt - cur;
                 if (diff > 0) playerInventory.AddAmmo(key, diff);
                 else if (diff < 0) playerInventory.TakeAmmo(key, -diff);
             }
         }
     }
 
-    // odemkni zbraně v WeaponHolderu podle uložených vlastněných ID
-    // aktuální zbraň – nyní po odemčení slotů funguje EquipByDefinition správně
-    if (weaponHolder != null)
-    {
-        var db = EffectiveDB;
-        string currentId = saveSystem.Load(K("CurrentWeaponId"), string.Empty);
-        if (!string.IsNullOrEmpty(currentId) && db != null)
-        {
-            var def = db.FindById(currentId);
-            if (def != null)
-            {
-                weaponHolder.EquipByDefinition(def);
-    
-                // načíst a nastavit počet nábojů v zásobníku pro tuto zbraň
-                int savedInMag = saveSystem.Load(K("CurrentWeaponInMag"), 0);
-                if (weaponHolder.Current is RangedWeaponBase rangedWeapon)
-                {
-                    // Tuto metodu je potřeba přidat do RangedWeaponBase (viz níže)
-                    rangedWeapon.SetMagazine(savedInMag);
-                }
-            }
-        }
-    }
-
-
-    // perky
+    // --- perky ---
     if (alchemyPerks != null)
     {
         foreach (PerkId pid in Enum.GetValues(typeof(PerkId)))
             alchemyPerks.SetUnlocked(pid, false);
-
         var ids = saveSystem.LoadArray(K("UnlockedPerkIds"), new int[0]);
         foreach (var v in ids)
             if (Enum.IsDefined(typeof(PerkId), v))
                 alchemyPerks.SetUnlocked((PerkId)v, true);
     }
 
-    // upgrady
+    // --- upgrady ---
     if (weaponUpgradeService != null && playerInventory != null)
     {
         var db = EffectiveDB;
@@ -633,26 +580,29 @@ namespace Obscurus.Save
         {
             var def = db?.FindById(ids[i]);
             var st  = weaponUpgradeService.GetState(def);
-            if (st != null)
-            {
-                st.damageTiers = tiers[i];
-                st.vitriolRune = runes[i] != 0;
-            }
+            if (st != null) { st.damageTiers = tiers[i]; st.vitriolRune = runes[i] != 0; }
         }
     }
 
-    // aktuální zbraň – nyní po odemčení slotů funguje EquipByDefinition správně
+    // --- WEAPON HOLDER: rebuild podle inventáře + equip uložené zbraně ---
     if (weaponHolder != null)
     {
         var db = EffectiveDB;
+        Obscurus.Items.ItemDefinition prefer = null;
         string currentId = saveSystem.Load(K("CurrentWeaponId"), string.Empty);
         if (!string.IsNullOrEmpty(currentId) && db != null)
-        {
-            var def = db.FindById(currentId);
-            if (def != null) weaponHolder.EquipByDefinition(def);
-        }
+            prefer = db.FindById(currentId);
+
+        // TADY JE TEN KLÍČ: po wipe/lock v NewGame přestav holder dle inventáře
+        weaponHolder.RebuildFromInventory(prefer, autoEquipFirst: true);
+
+        // magazine (pokud je to ranged)
+        int savedInMag = saveSystem.Load(K("CurrentWeaponInMag"), 0);
+        if (weaponHolder.Current is RangedWeaponBase rangedWeapon)
+            rangedWeapon.SetMagazine(savedInMag);
     }
 }
+
 
 
     }

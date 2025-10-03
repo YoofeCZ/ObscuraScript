@@ -7,7 +7,6 @@ using Sirenix.OdinInspector;
 #endif
 using Obscurus.Save;
 using Obscurus.Player;
-
 public class GameManager : MonoBehaviour
 {
     public static GameManager I { get; private set; }
@@ -216,25 +215,149 @@ public class GameManager : MonoBehaviour
     }
     
     void ApplyNewGameResets(GameObject p)
+{
+    if (!GameSaveController.IsNewGame)
     {
-        if (!GameSaveController.IsNewGame || !p) return;
+        Debug.Log("[GameManager] NewGame=false → reset inventáře/zbraní přeskočen.");
+        return;
+    }
+    if (!p)
+    {
+        Debug.LogWarning("[GameManager] ApplyNewGameResets: player instance je null.");
+        return;
+    }
 
-        var health  = p.GetComponent<HealthSystem>();
-        var armor   = p.GetComponent<ArmorSystem>();
-        var stamina = p.GetComponent<StaminaSystem>();
-        health?.ResetToBase();
-        armor?.ResetToBase();
-        stamina?.ResetToBase();
+    // --- Staty ---
+    var health  = p.GetComponent<HealthSystem>();
+    var armor   = p.GetComponent<ArmorSystem>();
+    var stamina = p.GetComponent<StaminaSystem>();
+    health?.ResetToBase();
+    armor?.ResetToBase();
+    stamina?.ResetToBase();
 
-        if (!devKeepInventoryOnNewGame)
+    // --- Inventář ---
+    if (!devKeepInventoryOnNewGame)
+    {
+        PlayerInventory inv = p.GetComponent<PlayerInventory>();
+
+        if (!inv)
         {
-            var inv = p.GetComponent<PlayerInventory>();
-            inv?.ResetAll(); // zdroje, munice, zbraně -> 0/empty
+#if UNITY_2022_2_OR_NEWER
+            inv = FindFirstObjectByType<PlayerInventory>(FindObjectsInactive.Include);
+#else
+            var allInv = Resources.FindObjectsOfTypeAll<PlayerInventory>();
+            foreach (var ii in allInv)
+            {
+                if (ii && ii.gameObject.scene.IsValid() && (ii.gameObject.hideFlags & HideFlags.HideInHierarchy) == 0)
+                { inv = ii; break; }
+            }
+#endif
+            if (inv)
+                Debug.LogWarning($"[GameManager] PlayerInventory nebyl na Playerovi, používám '{inv.name}' nalezený ve scéně.");
         }
 
-        // Reset proběhne jen jednou při nové hře
-        GameSaveController.IsNewGame = false;
+        if (inv)
+        {
+            Debug.Log("[GameManager] NewGame → wiping inventory.");
+            inv.ResetAll(); // zdroje, munice, zbraně -> 0/empty
+        }
+        else
+        {
+            Debug.LogWarning("[GameManager] Nenašel jsem žádný PlayerInventory k wipe.");
+        }
     }
+    else
+    {
+        Debug.Log("[GameManager] DevKeepInventoryOnNewGame = true → inventář se nemaže.");
+    }
+
+    // --- Zbraně: zamknout všechno a vypnout instance ---
+    WeaponHolder holder = p.GetComponentInChildren<WeaponHolder>(true);
+    if (!holder)
+    {
+#if UNITY_2022_2_OR_NEWER
+        holder = FindFirstObjectByType<WeaponHolder>(FindObjectsInactive.Include);
+#else
+        var allH = Resources.FindObjectsOfTypeAll<WeaponHolder>();
+        foreach (var h in allH)
+        {
+            if (h && h.gameObject.scene.IsValid() && (h.gameObject.hideFlags & HideFlags.HideInHierarchy) == 0)
+            { holder = h; break; }
+        }
+#endif
+        if (!holder && WeaponHolder.Local)
+            holder = WeaponHolder.Local;
+    }
+
+    if (holder)
+    {
+        Debug.Log("[GameManager] NewGame → locking all weapons.");
+
+        // 1) preferuj veřejné API, pokud existuje (LockAll)
+        var mi = typeof(WeaponHolder).GetMethod(
+            "LockAll",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public
+        );
+        if (mi != null)
+        {
+            // očekávaný sign.: void LockAll(bool keepDefaults)
+            mi.Invoke(holder, new object[] { false });
+        }
+        else
+        {
+            // 2) fallback: tvrdě uzamkni sloty a vypni GO
+            try
+            {
+                // Deaktivuj aktuální
+                var cur = holder.Current;
+                if (cur is MonoBehaviour curMb)
+                {
+                    try { cur.OnHolster(); } catch { /* ignore */ }
+                    if (curMb && curMb.gameObject.activeSelf) curMb.gameObject.SetActive(false);
+                }
+
+                // Uzamkni všechny sloty a vypni instance
+                if (holder.slots != null)
+                {
+                    foreach (var s in holder.slots)
+                    {
+                        if (s == null) continue;
+                        s.unlocked = false;
+                        if (s.instance && s.instance.gameObject.activeSelf)
+                            s.instance.gameObject.SetActive(false);
+                        if (s.weaponIfc is MonoBehaviour mb && mb.gameObject.activeSelf)
+                            mb.gameObject.SetActive(false);
+                    }
+                }
+
+                // Pokusně vynuluj Current přes reflexi (setter je private)
+                var prop = typeof(WeaponHolder).GetProperty(
+                    "Current",
+                    System.Reflection.BindingFlags.Instance |
+                    System.Reflection.BindingFlags.Public |
+                    System.Reflection.BindingFlags.NonPublic
+                );
+                if (prop != null && prop.CanWrite)
+                    prop.SetValue(holder, null);
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[GameManager] Fallback lock weapons selhal: {e.Message}");
+            }
+        }
+    }
+    else
+    {
+        Debug.LogWarning("[GameManager] WeaponHolder nenalezen – zbraně nezamknuty.");
+    }
+
+    // Proběhne jen jednou
+    GameSaveController.IsNewGame = false;
+}
+
+
+
+
 
 
     // === SceneLoaded → spawn hráče ===
@@ -276,24 +399,7 @@ public class GameManager : MonoBehaviour
         }
 
         // 3) Reset pouze při "Nové hře" (staty + případně inventář)
-        if (GameSaveController.IsNewGame)
-        {
-            var health  = p.GetComponent<HealthSystem>();
-            var armor   = p.GetComponent<ArmorSystem>();
-            var stamina = p.GetComponent<StaminaSystem>();
-            health?.ResetToBase();
-            armor?.ResetToBase();
-            stamina?.ResetToBase();
-
-            if (!devKeepInventoryOnNewGame)
-            {
-                var inv = p.GetComponent<PlayerInventory>();
-                inv?.ResetAll(); // zdroje, munice, zbraně -> 0/empty
-            }
-
-            // Reset spustit jen jednou
-            GameSaveController.IsNewGame = false;
-        }
+        ApplyNewGameResets(p);
 
         // 4) Ulož a vystřel eventy
         CurrentPlayer = p;
@@ -304,6 +410,7 @@ public class GameManager : MonoBehaviour
         pendingSpawnId = null;
         _loadingLevelName = null;
     }
+
 
 
     IEnumerator EmitSpawnNextFrame(GameObject player)

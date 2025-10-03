@@ -244,6 +244,53 @@ namespace Obscurus.Player
 
             WeaponChanged?.Invoke(Current);
         }
+        // ---------- Lock/Reset pro New Game ----------
+        public void LockAll(bool keepDefaults = false)
+        {
+            // 1) schovej aktuální zbraň
+            SetWeapon(null);          // bezpečně odholstruje a vypne GO
+
+            // 2) vyprázdni dostupné zbraně
+            _available.Clear();
+            _index = -1;
+
+            // 3) uzamkni všechny sloty a vypni jejich GameObjecty
+            for (int i = 0; i < slots.Count; i++)
+            {
+                var s = slots[i];
+                if (s == null) continue;
+
+                s.unlocked = keepDefaults && s.unlockedByDefault ? true : false;
+
+                if (s.instance is MonoBehaviour mb)
+                {
+                    var go = mb.gameObject;
+                    if (go && go.activeSelf) go.SetActive(false);
+                }
+            }
+
+            // 4) notif pro HUDy – Current je teď null
+            WeaponChanged?.Invoke(Current);
+        }
+        
+        // Postav znovu dostupné zbraně podle PlayerInventory a případně rovnou equipni.
+        public void RebuildFromInventory(Obscurus.Items.ItemDefinition preferDef = null, bool autoEquipFirst = true)
+        {
+            var wish = preferDef ?? Current?.Definition;
+
+            // bezpečně „odholstruj“ a vypni aktuální GO
+            SetWeapon(null);
+
+            // znovu spočítej odemčené sloty a vypni jejich GO (zapíná je až SetWeapon)
+            BootstrapSlots();
+
+            // equip preferované (např. uložené), jinak první dostupnou
+            if (wish && EquipByDefinition(wish)) { }
+            else if (autoEquipFirst) EquipByIndex(0);
+
+            WeaponChanged?.Invoke(Current);
+        }
+
 
         private int FindSlotIndex(ItemDefinition def)
         {
