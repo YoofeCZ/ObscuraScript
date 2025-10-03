@@ -83,7 +83,8 @@ namespace Obscurus.Save
 
                 // Save owned weapons (playerInventory holds them as weaponEntries)
                 var ownedWeaponIds = playerInventory.GetOwnedWeaponIds();
-                saveSystem.SaveArray("OwnedWeaponIds", ownedWeaponIds.ToArray());
+                // Arrays can be saved directly via Save() – SaveSystem automatically handles array types
+                saveSystem.Save("OwnedWeaponIds", ownedWeaponIds.ToArray());
 
                 // Save ammo reserves: keys and counts only for ammo > 0
                 if (itemDatabase != null)
@@ -101,8 +102,8 @@ namespace Obscurus.Save
                             ammoCounts.Add(count);
                         }
                     }
-                    saveSystem.SaveArray("AmmoKeys", ammoKeys.ToArray());
-                    saveSystem.SaveArray("AmmoCounts", ammoCounts.ToArray());
+                    saveSystem.Save("AmmoKeys", ammoKeys.ToArray());
+                    saveSystem.Save("AmmoCounts", ammoCounts.ToArray());
                 }
             }
 
@@ -112,7 +113,7 @@ namespace Obscurus.Save
                 var unlocked = new List<int>();
                 foreach (PerkId pid in Enum.GetValues(typeof(PerkId)))
                     if (alchemyPerks.IsUnlocked(pid)) unlocked.Add((int)pid);
-                saveSystem.SaveArray("UnlockedPerkIds", unlocked.ToArray());
+                saveSystem.Save("UnlockedPerkIds", unlocked.ToArray());
             }
 
             // Save per‑weapon upgrades
@@ -133,9 +134,9 @@ namespace Obscurus.Save
                         vitriolRunes.Add(st.vitriolRune ? 1 : 0);
                     }
                 }
-                saveSystem.SaveArray("UpgradeWeaponIds", upgradeIds.ToArray());
-                saveSystem.SaveArray("UpgradeDamageTiers", damageTiers.ToArray());
-                saveSystem.SaveArray("UpgradeVitriolRune", vitriolRunes.ToArray());
+                saveSystem.Save("UpgradeWeaponIds", upgradeIds.ToArray());
+                saveSystem.Save("UpgradeDamageTiers", damageTiers.ToArray());
+                saveSystem.Save("UpgradeVitriolRune", vitriolRunes.ToArray());
             }
 
             // Save currently equipped weapon (if any)
@@ -171,25 +172,26 @@ namespace Obscurus.Save
             if (playerTransform == null) { Debug.LogWarning("[GameSaveController] Player transform not assigned."); return; }
 
             // Load position and rotation
-            var pos = saveSystem.Load("PlayerPos", playerTransform.position).AsVector3();
-            var rot = saveSystem.Load("PlayerRot", playerTransform.eulerAngles).AsVector3();
+            // Load position and rotation directly; when passing a default value, SaveSystem returns the same type
+            Vector3 pos = saveSystem.Load("PlayerPos", playerTransform.position);
+            Vector3 rot = saveSystem.Load("PlayerRot", playerTransform.eulerAngles);
             playerTransform.position    = pos;
             playerTransform.eulerAngles = rot;
 
             // Load current health, armour and stamina (use Refill() to set values)
             if (healthSystem != null)
             {
-                float hp = saveSystem.Load("PlayerHP", healthSystem.Current).AsFloat();
+                float hp = saveSystem.Load("PlayerHP", healthSystem.Current);
                 healthSystem.Refill(hp);
             }
             if (armorSystem != null)
             {
-                float ar = saveSystem.Load("PlayerArmor", armorSystem.Current).AsFloat();
+                float ar = saveSystem.Load("PlayerArmor", armorSystem.Current);
                 armorSystem.Refill(ar);
             }
             if (staminaSystem != null)
             {
-                float st = saveSystem.Load("PlayerStamina", staminaSystem.Current).AsFloat();
+                float st = saveSystem.Load("PlayerStamina", staminaSystem.Current);
                 staminaSystem.Refill(st);
             }
 
@@ -199,14 +201,15 @@ namespace Obscurus.Save
                 foreach (ResourceKey key in Enum.GetValues(typeof(ResourceKey)))
                 {
                     int current = playerInventory.GetResource(key);
-                    int target  = saveSystem.Load($"Res_{key}", current).AsInt();
+                    int target  = saveSystem.Load($"Res_{key}", current);
                     int diff    = target - current;
                     if (diff > 0) playerInventory.AddResource(key, diff);
                     else if (diff < 0) playerInventory.SpendResource(key, -diff);
                 }
 
                 // Load owned weapons
-                var savedOwned = saveSystem.LoadArray("OwnedWeaponIds", new string[0]).AsStringArray();
+                // Arrays are loaded directly via Load() – returns string[]
+                var savedOwned = saveSystem.Load("OwnedWeaponIds", new string[0]);
                 // Remove any weapons not in the saved list
                 var currentOwned = playerInventory.GetOwnedWeaponIds().ToList();
                 foreach (var wid in currentOwned)
@@ -230,8 +233,8 @@ namespace Obscurus.Save
                 // Load ammo reserves
                 if (itemDatabase != null)
                 {
-                    var keys   = saveSystem.LoadArray("AmmoKeys", new string[0]).AsStringArray();
-                    var counts = saveSystem.LoadArray("AmmoCounts", new int[0]).AsIntArray();
+                    var keys   = saveSystem.Load("AmmoKeys", new string[0]);
+                    var counts = saveSystem.Load("AmmoCounts", new int[0]);
                     for (int i = 0; i < keys.Length && i < counts.Length; i++)
                     {
                         string key = keys[i];
@@ -251,7 +254,7 @@ namespace Obscurus.Save
                 foreach (PerkId pid in Enum.GetValues(typeof(PerkId)))
                     alchemyPerks.SetUnlocked(pid, false);
                 // Set loaded perks to true
-                var ids = saveSystem.LoadArray("UnlockedPerkIds", new int[0]).AsIntArray();
+                var ids = saveSystem.Load("UnlockedPerkIds", new int[0]);
                 foreach (var v in ids)
                 {
                     if (Enum.IsDefined(typeof(PerkId), v))
@@ -262,9 +265,9 @@ namespace Obscurus.Save
             // Load per‑weapon upgrades
             if (weaponUpgradeService != null && playerInventory != null)
             {
-                var ids         = saveSystem.LoadArray("UpgradeWeaponIds",     new string[0]).AsStringArray();
-                var damageTiers = saveSystem.LoadArray("UpgradeDamageTiers", new int[0]).AsIntArray();
-                var vitriolRunes= saveSystem.LoadArray("UpgradeVitriolRune",  new int[0]).AsIntArray();
+                var ids         = saveSystem.Load("UpgradeWeaponIds",     new string[0]);
+                var damageTiers = saveSystem.Load("UpgradeDamageTiers", new int[0]);
+                var vitriolRunes= saveSystem.Load("UpgradeVitriolRune",  new int[0]);
                 for (int i = 0; i < ids.Length && i < damageTiers.Length && i < vitriolRunes.Length; i++)
                 {
                     var def = itemDatabase != null ? itemDatabase.FindById(ids[i]) : null;
@@ -281,7 +284,7 @@ namespace Obscurus.Save
             // Load currently equipped weapon
             if (weaponHolder != null)
             {
-                var currentId = saveSystem.Load("CurrentWeaponId", string.Empty).AsString();
+                var currentId = saveSystem.Load("CurrentWeaponId", string.Empty);
                 if (!string.IsNullOrEmpty(currentId) && itemDatabase != null)
                 {
                     var def = itemDatabase.FindById(currentId);
