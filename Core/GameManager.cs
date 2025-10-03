@@ -5,7 +5,6 @@ using UnityEngine.SceneManagement;
 #if ODIN_INSPECTOR
 using Sirenix.OdinInspector;
 #endif
-using Obscurus.Save;
 
 public class GameManager : MonoBehaviour
 {
