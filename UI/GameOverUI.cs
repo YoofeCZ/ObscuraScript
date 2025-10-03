@@ -249,8 +249,14 @@ namespace Obscurus
         public void OnClick_LoadLast()
         {
             Hide(restoreTimeScale: true, keepCursor: false, soft: false);
-            SaveManager.LoadLastSave();
+            var ctrl = FindObjectOfType<GameSaveController>();
+            if (ctrl != null)
+            {
+                // zde zvolte slot, který chcete považovat za „poslední“
+                ctrl.LoadSlot(1);
+            }
         }
+
         // nahraď celou OnClick_LoadMenu
         public void OnClick_LoadMenu()
         {

@@ -10,7 +10,7 @@ namespace Obscurus.Save
 {
     /// <summary>
     /// Ukládá a načítá všechna potřebná data hráče pomocí AA Save & Load Systemu.
-    /// Umožňuje volit slot (1–3) nastavením přípony souboru.
+    /// Sloty (1–3) řešíme prefixem klíčů (S{slot}_KeyName).
     /// </summary>
     [DisallowMultipleComponent]
     public class GameSaveController : MonoBehaviour
@@ -28,7 +28,6 @@ namespace Obscurus.Save
         public WeaponHolder weaponHolder;
 
         [SerializeField] private int currentSlot = 1;   // výchozí slot
-        private string baseExtension;                   // původní přípona z inspektoru
 
         /// <summary>
         /// Označuje, zda se spouští nová hra.  Resetuje se při načtení slotu.
@@ -37,19 +36,20 @@ namespace Obscurus.Save
 
         void Awake()
         {
-            if (saveSystem != null)
-                baseExtension = saveSystem.SaveFileExtension;
             SetSlot(currentSlot);
         }
 
         /// <summary>
-        /// Nastaví slot (1–3) a změní příponu ukládacího souboru, např. .slot1.
+        /// Pomocná funkce pro prefixování klíčů podle slotu (S1_, S2_, S3_).
+        /// </summary>
+        private string K(string key) => $"S{currentSlot}_{key}";
+
+        /// <summary>
+        /// Nastaví slot (1–3).
         /// </summary>
         public void SetSlot(int slot)
         {
             currentSlot = Mathf.Clamp(slot, 1, 3);
-            if (saveSystem != null && !string.IsNullOrEmpty(baseExtension))
-                saveSystem.SaveFileExtension = $"{baseExtension}.slot{currentSlot}";
         }
 
         /// <summary>Uloží veškerá data do aktuálního slotu.</summary>
@@ -58,21 +58,21 @@ namespace Obscurus.Save
             if (saveSystem == null || playerTransform == null) return;
 
             // pozice a rotace (Euler)
-            saveSystem.Save("PlayerPos", playerTransform.position);
-            saveSystem.Save("PlayerRot", playerTransform.eulerAngles);
+            saveSystem.Save(K("PlayerPos"), playerTransform.position);
+            saveSystem.Save(K("PlayerRot"), playerTransform.eulerAngles);
 
             // životy, brnění, stamina
-            if (healthSystem  != null) saveSystem.Save("PlayerHP",    healthSystem.Current);
-            if (armorSystem   != null) saveSystem.Save("PlayerArmor", armorSystem.Current);
-            if (staminaSystem != null) saveSystem.Save("PlayerStamina", staminaSystem.Current);
+            if (healthSystem  != null) saveSystem.Save(K("PlayerHP"),      healthSystem.Current);
+            if (armorSystem   != null) saveSystem.Save(K("PlayerArmor"),   armorSystem.Current);
+            if (staminaSystem != null) saveSystem.Save(K("PlayerStamina"), staminaSystem.Current);
 
             // suroviny a zbraně
             if (playerInventory != null)
             {
                 foreach (ResourceKey key in Enum.GetValues(typeof(ResourceKey)))
-                    saveSystem.Save($"Res_{key}", playerInventory.GetResource(key));
+                    saveSystem.Save(K($"Res_{key}"), playerInventory.GetResource(key));
 
-                saveSystem.Save("OwnedWeaponIds", playerInventory.GetOwnedWeaponIds().ToArray());
+                saveSystem.Save(K("OwnedWeaponIds"), playerInventory.GetOwnedWeaponIds().ToArray());
 
                 // rezervy munice (pouze klíče s nenulovým množstvím)
                 if (itemDatabase != null)
@@ -86,8 +86,8 @@ namespace Obscurus.Save
                         int count = playerInventory.GetAmmoReserve(key);
                         if (count > 0) { keys.Add(key); counts.Add(count); }
                     }
-                    saveSystem.Save("AmmoKeys",   keys.ToArray());
-                    saveSystem.Save("AmmoCounts", counts.ToArray());
+                    saveSystem.Save(K("AmmoKeys"),   keys.ToArray());
+                    saveSystem.Save(K("AmmoCounts"), counts.ToArray()); // int[]
                 }
             }
 
@@ -97,7 +97,7 @@ namespace Obscurus.Save
                 var list = new List<int>();
                 foreach (PerkId pid in Enum.GetValues(typeof(PerkId)))
                     if (alchemyPerks.IsUnlocked(pid)) list.Add((int)pid);
-                saveSystem.Save("UnlockedPerkIds", list.ToArray());
+                saveSystem.Save(K("UnlockedPerkIds"), list.ToArray()); // int[]
             }
 
             // upgrady zbraní
@@ -115,15 +115,15 @@ namespace Obscurus.Save
                     tiers.Add(st.damageTiers);
                     runes.Add(st.vitriolRune ? 1 : 0);
                 }
-                saveSystem.Save("UpgradeWeaponIds",   ids.ToArray());
-                saveSystem.Save("UpgradeDamageTiers", tiers.ToArray());
-                saveSystem.Save("UpgradeVitriolRune", runes.ToArray());
+                saveSystem.Save(K("UpgradeWeaponIds"),   ids.ToArray());   // string[]
+                saveSystem.Save(K("UpgradeDamageTiers"), tiers.ToArray()); // int[]
+                saveSystem.Save(K("UpgradeVitriolRune"), runes.ToArray()); // int[]
             }
 
             // aktuálně vybavená zbraň
             string currentId = (weaponHolder != null && weaponHolder.Current != null && weaponHolder.Current.Definition != null)
                              ? weaponHolder.Current.Definition.Id : string.Empty;
-            saveSystem.Save("CurrentWeaponId", currentId);
+            saveSystem.Save(K("CurrentWeaponId"), currentId);
         }
 
         /// <summary>Načte data z aktuálního slotu.</summary>
@@ -132,15 +132,15 @@ namespace Obscurus.Save
             if (saveSystem == null || playerTransform == null) return;
 
             // pozice a rotace
-            Vector3 pos = saveSystem.Load("PlayerPos", playerTransform.position);
-            Vector3 rot = saveSystem.Load("PlayerRot", playerTransform.eulerAngles);
+            Vector3 pos = saveSystem.Load(K("PlayerPos"), playerTransform.position);
+            Vector3 rot = saveSystem.Load(K("PlayerRot"), playerTransform.eulerAngles);
             playerTransform.position    = pos;
             playerTransform.eulerAngles = rot;
 
             // HP, Armor, Stamina
-            if (healthSystem  != null) healthSystem.Refill(saveSystem.Load("PlayerHP",    healthSystem.Current));
-            if (armorSystem   != null) armorSystem.Refill(saveSystem.Load("PlayerArmor", armorSystem.Current));
-            if (staminaSystem != null) staminaSystem.Refill(saveSystem.Load("PlayerStamina", staminaSystem.Current));
+            if (healthSystem  != null) healthSystem.Refill(saveSystem.Load(K("PlayerHP"),      healthSystem.Current));
+            if (armorSystem   != null) armorSystem.Refill(saveSystem.Load(K("PlayerArmor"),    armorSystem.Current));
+            if (staminaSystem != null) staminaSystem.Refill(saveSystem.Load(K("PlayerStamina"), staminaSystem.Current));
 
             // suroviny, zbraně, munice
             if (playerInventory != null)
@@ -148,14 +148,14 @@ namespace Obscurus.Save
                 foreach (ResourceKey key in Enum.GetValues(typeof(ResourceKey)))
                 {
                     int current = playerInventory.GetResource(key);
-                    int target  = saveSystem.Load($"Res_{key}", current);
+                    int target  = saveSystem.Load(K($"Res_{key}"), current);
                     int diff = target - current;
                     if (diff > 0) playerInventory.AddResource(key, diff);
                     else if (diff < 0) playerInventory.SpendResource(key, -diff);
                 }
 
                 // seznam vlastněných zbraní – načtení pole stringů
-                var savedOwned = saveSystem.LoadArray("OwnedWeaponIds", new string[0]).AsStringArray();
+                var savedOwned = saveSystem.LoadArray(K("OwnedWeaponIds"), new string[0]).AsStringArray();
                 var currentOwned = playerInventory.GetOwnedWeaponIds().ToList();
                 foreach (var wid in currentOwned)
                     if (!savedOwned.Contains(wid)) playerInventory.RemoveWeapon(itemDatabase.FindById(wid));
@@ -163,8 +163,8 @@ namespace Obscurus.Save
                     if (!currentOwned.Contains(wid)) playerInventory.AddWeapon(itemDatabase.FindById(wid));
 
                 // rezervy munice
-                var ammoKeys   = saveSystem.LoadArray("AmmoKeys",   new string[0]).AsStringArray();
-                var ammoCounts = saveSystem.LoadArray("AmmoCounts", new int[0]).AsIntArray();
+                var ammoKeys   = saveSystem.LoadArray(K("AmmoKeys"),   new string[0]).AsStringArray();
+                var ammoCounts = saveSystem.LoadArray(K("AmmoCounts"), new int[0]); // ← žádné .AsIntArray()
                 for (int i = 0; i < ammoKeys.Length && i < ammoCounts.Length; i++)
                 {
                     string key = ammoKeys[i];
@@ -181,7 +181,8 @@ namespace Obscurus.Save
             {
                 foreach (PerkId pid in Enum.GetValues(typeof(PerkId)))
                     alchemyPerks.SetUnlocked(pid, false);
-                var ids = saveSystem.LoadArray("UnlockedPerkIds", new int[0]).AsIntArray();
+
+                var ids = saveSystem.LoadArray(K("UnlockedPerkIds"), new int[0]); // ← žádné .AsIntArray()
                 foreach (var v in ids)
                     if (Enum.IsDefined(typeof(PerkId), v))
                         alchemyPerks.SetUnlocked((PerkId)v, true);
@@ -190,9 +191,9 @@ namespace Obscurus.Save
             // upgrady zbraní
             if (weaponUpgradeService != null && playerInventory != null)
             {
-                var ids        = saveSystem.LoadArray("UpgradeWeaponIds",   new string[0]).AsStringArray();
-                var tiers      = saveSystem.LoadArray("UpgradeDamageTiers", new int[0]).AsIntArray();
-                var runes      = saveSystem.LoadArray("UpgradeVitriolRune", new int[0]).AsIntArray();
+                var ids   = saveSystem.LoadArray(K("UpgradeWeaponIds"),   new string[0]).AsStringArray();
+                var tiers = saveSystem.LoadArray(K("UpgradeDamageTiers"), new int[0]); // ← int[]
+                var runes = saveSystem.LoadArray(K("UpgradeVitriolRune"), new int[0]); // ← int[]
                 for (int i = 0; i < ids.Length && i < tiers.Length && i < runes.Length; i++)
                 {
                     var def = itemDatabase?.FindById(ids[i]);
@@ -208,7 +209,7 @@ namespace Obscurus.Save
             // aktuálně vybavená zbraň
             if (weaponHolder != null)
             {
-                var id = saveSystem.Load("CurrentWeaponId", string.Empty);
+                var id = saveSystem.Load(K("CurrentWeaponId"), string.Empty);
                 if (!string.IsNullOrEmpty(id) && itemDatabase != null)
                 {
                     var def = itemDatabase.FindById(id);
@@ -234,14 +235,32 @@ namespace Obscurus.Save
         public void DeleteSlot(int slot)
         {
             SetSlot(slot);
-            // Kompletně smaže všechna data v daném souboru
-            saveSystem.DeleteAll();
+            if (saveSystem == null) return;
+
+            // Přepsání známých klíčů "prázdnou" hodnotou:
+            saveSystem.Save(K("PlayerPos"), Vector3.zero);
+            saveSystem.Save(K("PlayerRot"), Vector3.zero);
+            saveSystem.Save(K("PlayerHP"), 0);
+            saveSystem.Save(K("PlayerArmor"), 0);
+            saveSystem.Save(K("PlayerStamina"), 0);
+            saveSystem.Save(K("OwnedWeaponIds"), Array.Empty<string>());
+            saveSystem.Save(K("AmmoKeys"), Array.Empty<string>());
+            saveSystem.Save(K("AmmoCounts"), Array.Empty<int>());
+            saveSystem.Save(K("UnlockedPerkIds"), Array.Empty<int>());
+            saveSystem.Save(K("UpgradeWeaponIds"), Array.Empty<string>());
+            saveSystem.Save(K("UpgradeDamageTiers"), Array.Empty<int>());
+            saveSystem.Save(K("UpgradeVitriolRune"), Array.Empty<int>());
+            saveSystem.Save(K("CurrentWeaponId"), string.Empty);
+
+            // Suroviny: vynulovat všechny ResourceKey
+            foreach (ResourceKey key in Enum.GetValues(typeof(ResourceKey)))
+                saveSystem.Save(K($"Res_{key}"), 0);
         }
 
         public string SlotSummary(int slot)
         {
             SetSlot(slot);
-            return saveSystem.DoesDataExists("PlayerPos") ? "Saved" : "Empty";
+            return saveSystem.DoesDataExists(K("PlayerPos")) ? "Saved" : "Empty";
         }
     }
 }

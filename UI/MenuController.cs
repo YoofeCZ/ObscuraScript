@@ -8,7 +8,7 @@ using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.Universal;
-using Obscurus.Save; // ⬅️ DŮLEŽITÉ
+using Obscurus.Save;
 
 public class MenuController : MonoBehaviour
 {
@@ -18,27 +18,27 @@ public class MenuController : MonoBehaviour
     public CanvasGroup mainMenu;
     public CanvasGroup pauseMenu;
     public CanvasGroup options;
-    public CanvasGroup saves;   // Save/Load v pauze
-    public CanvasGroup loads;   // pouze Load v hlavním menu
+    public CanvasGroup saves;
+    public CanvasGroup loads;
 
     [Header("Graphics UI")]
     public TMP_Dropdown qualityDropdown;
     public TMP_Dropdown fullscreenDropdown;
     public TMP_Dropdown resolutionDropdown;
-    public Toggle        vSyncToggle;
-    public TMP_Dropdown  msaaDropdown;       // Off/2x/4x/8x
-    public Slider        renderScaleSlider;  // 0.5–1.5
-    public Toggle        hdrToggle;
+    public Toggle vSyncToggle;
+    public TMP_Dropdown msaaDropdown;
+    public Slider renderScaleSlider;
+    public Toggle hdrToggle;
 
     [Header("Audio UI")]
     public Slider masterVolume;
-    public Slider musicVolume;  // zatím PlayerPrefs
+    public Slider musicVolume;
     public Slider sfxVolume;
 
     [Header("Controls UI")]
-    public Slider mouseSensitivity;   // PlayerPrefs: "mouse_sens"
+    public Slider mouseSensitivity;
     public Toggle invertYToggle;
-    public Slider fovSlider;          // PlayerPrefs: "fov"
+    public Slider fovSlider;
 
     [Header("Save panel (Pause)")]
     public TextMeshProUGUI slot1Label, slot2Label, slot3Label;
@@ -49,16 +49,13 @@ public class MenuController : MonoBehaviour
     public RawImage load1Thumb, load2Thumb, load3Thumb;
 
     [Header("Optional refs (auto-find)")]
-    public Obscurus.UI.InventoryOverlayUI inventoryOverlay; // ⬅️ přidáno
+    public Obscurus.UI.InventoryOverlayUI inventoryOverlay;
 
     bool paused;
     Resolution[] _resList;
-
-    // Kam se vrátit po zavření Options (pauza/main/loads/saves)
     CanvasGroup _optionsBackTarget;
-
-    // Když otevřu Load z GameOveru, Back má vrátit GameOver
     bool _loadsBackToGameOver = false;
+    private GameSaveController saveCtrl;
 
     public bool IsOverlayOpen =>
         (mainMenu && mainMenu.blocksRaycasts) ||
@@ -67,7 +64,6 @@ public class MenuController : MonoBehaviour
         (saves && saves.blocksRaycasts) ||
         (loads && loads.blocksRaycasts);
 
-    // rychlý check jen pro pauzu
     public bool IsPaused => pauseMenu && pauseMenu.blocksRaycasts;
 
     void Awake()
@@ -75,7 +71,9 @@ public class MenuController : MonoBehaviour
         if (I && I != this) { Destroy(gameObject); return; }
         I = this;
 
-        // auto-find inventáře (když není přiřazen v inspektoru)
+        saveCtrl = FindObjectOfType<GameSaveController>();
+
+        // auto-find inventáře
         if (!inventoryOverlay) inventoryOverlay = FindInventoryOverlay();
 
         // === Graphics UI bootstrap ===
@@ -113,12 +111,12 @@ public class MenuController : MonoBehaviour
         }
         if (vSyncToggle) vSyncToggle.isOn = QualitySettings.vSyncCount > 0;
 
-        // === Audio ===
+        // Audio
         if (masterVolume) { masterVolume.value = PlayerPrefs.GetFloat("vol_master", 1f); AudioListener.volume = masterVolume.value; }
         if (musicVolume)  musicVolume.value = PlayerPrefs.GetFloat("vol_music", 0.8f);
         if (sfxVolume)    sfxVolume.value   = PlayerPrefs.GetFloat("vol_sfx",   0.8f);
 
-        // === Controls ===
+        // Controls
         if (mouseSensitivity) mouseSensitivity.value = PlayerPrefs.GetFloat("mouse_sens", 1f);
         if (invertYToggle)    invertYToggle.isOn     = PlayerPrefs.GetInt("invert_y", 0) == 1;
         if (fovSlider)        fovSlider.value        = PlayerPrefs.GetFloat("fov", 90f);
@@ -127,7 +125,6 @@ public class MenuController : MonoBehaviour
         ShowOnly(mainMenu);
         Set(options, false); Set(saves, false); Set(loads, false);
 
-        // předvyplň sloty
         RefreshSavesPanel();
         RefreshLoadsPanel();
     }
@@ -137,16 +134,15 @@ public class MenuController : MonoBehaviour
         var kb = Keyboard.current;
         if (kb == null) return;
 
-        // ESC v gameplayi
         bool inAnyLevel = IsAnyNonBootstrapSceneLoaded();
 
         if (kb.escapeKey.wasPressedThisFrame && inAnyLevel)
         {
-            // 1) pokud jsem v Options/Saves → ESC je zavře (zpět do pauzy)
+            // ESC zavírá Options/Saves
             if (options && options.alpha > 0) { Btn_CloseOptions(); return; }
             if (saves   && saves.alpha   > 0) { Btn_CloseSaves();   return; }
 
-            // 2) ESC je „master“: otevřený inventář nejdřív zavřít → pak pauzu
+            // zavři inventář → pauza
             if (inventoryOverlay != null && inventoryOverlay.IsOpen)
             {
                 inventoryOverlay.Close();
@@ -155,7 +151,6 @@ public class MenuController : MonoBehaviour
                 return;
             }
 
-            // 3) Jinak toggle pauzy
             TogglePause();
         }
     }
@@ -198,7 +193,7 @@ public class MenuController : MonoBehaviour
 
     static void Set(CanvasGroup g, bool v)
     {
-        if(!g) return;
+        if (!g) return;
         g.alpha = v ? 1 : 0;
         g.blocksRaycasts = v;
         g.interactable = v;
@@ -231,30 +226,35 @@ public class MenuController : MonoBehaviour
     }
 
     // ===== Main menu buttons =====
+    // ===== Main menu buttons =====
     public void Btn_Play()
     {
-        SaveManager.IsNewGame = true;   // nová hra
+        GameSaveController.IsNewGame = true;
         ShowOnly(null);
-        Set(mainMenu,false);
+        Set(mainMenu, false);
         GameManager.I?.EnableGameplayCursor();
-        GameManager.I?.LoadDefault();
+        GameManager.I?.LoadDefault();  // ← volá nyní existující veřejnou metodu
     }
+
     public void Btn_PlayDev()
     {
-        SaveManager.IsNewGame = true;   // nová hra (Dev)
+        GameSaveController.IsNewGame = true;
         ShowOnly(null);
-        Set(mainMenu,false);
+        Set(mainMenu, false);
         GameManager.I?.EnableGameplayCursor();
-        GameManager.I?.LoadDev();
+        GameManager.I?.LoadDev();      // ← volá nyní existující veřejnou metodu
     }
+
     public void Btn_PlayExample()
     {
-        SaveManager.IsNewGame = true;   // nová hra (Example)
+        GameSaveController.IsNewGame = true;
         ShowOnly(null);
-        Set(mainMenu,false);
+        Set(mainMenu, false);
         GameManager.I?.EnableGameplayCursor();
-        GameManager.I?.LoadExample();
+        GameManager.I?.LoadExample();  // ← volá nyní existující veřejnou metodu
     }
+
+
 
     public void Btn_OpenOptions()
     {
@@ -279,16 +279,14 @@ public class MenuController : MonoBehaviour
         _optionsBackTarget = null;
     }
 
-    public void Btn_OpenLoads()   { _loadsBackToGameOver = false; RefreshLoadsPanel(); ShowOnly(loads); }
+    public void Btn_OpenLoads() { _loadsBackToGameOver = false; RefreshLoadsPanel(); ShowOnly(loads); }
     public void Btn_CloseLoads()
     {
         if (_loadsBackToGameOver)
         {
             _loadsBackToGameOver = false;
-
             var go = FindFirstObjectByType<Obscurus.GameOverUI>(FindObjectsInactive.Include);
             if (go) { go.RestoreAfterLoads(); return; }
-
             ShowOnly(mainMenu);
             return;
         }
@@ -297,11 +295,11 @@ public class MenuController : MonoBehaviour
 
     public void Btn_Quit()
     {
-    #if UNITY_EDITOR
+#if UNITY_EDITOR
         UnityEditor.EditorApplication.isPlaying = false;
-    #else
+#else
         Application.Quit();
-    #endif
+#endif
     }
 
     // ===== Pause buttons =====
@@ -322,7 +320,7 @@ public class MenuController : MonoBehaviour
     public void Btn_OpenSaves() { RefreshSavesPanel(); ShowOnly(saves); }
     public void Btn_CloseSaves(){ ShowOnly(pauseMenu); }
 
-    // ===== Graphics bindings =====
+    // ===== Graphics, Audio, Controls handlers =====
     public void OnQualityChanged(int idx) { QualitySettings.SetQualityLevel(idx, true); PlayerPrefs.SetInt("opt_quality", idx); }
     public void OnFullscreenChanged(int idx) { var mode = IndexToFullscreen(idx); Screen.fullScreenMode = mode; PlayerPrefs.SetInt("opt_fullscreen", idx); }
     public void OnResolutionChanged(int idx)
@@ -338,49 +336,100 @@ public class MenuController : MonoBehaviour
     public void OnRenderScaleChanged(float v) { var urp = GetURP(); if (!urp) return; urp.renderScale = Mathf.Clamp(v, 0.5f, 1.5f); PlayerPrefs.SetFloat("opt_renderscale", urp.renderScale); }
     public void OnHDRChanged(bool on) { var urp = GetURP(); if (!urp) return; urp.supportsHDR = on; PlayerPrefs.SetInt("opt_hdr", on ? 1 : 0); }
 
-    // ===== Audio bindings =====
     public void OnMasterVolume(float v) { AudioListener.volume = Mathf.Clamp01(v); PlayerPrefs.SetFloat("vol_master", AudioListener.volume); }
     public void OnMusicVolume (float v) { PlayerPrefs.SetFloat("vol_music", Mathf.Clamp01(v)); }
     public void OnSfxVolume   (float v) { PlayerPrefs.SetFloat("vol_sfx",   Mathf.Clamp01(v)); }
 
-    // ===== Controls bindings =====
     public void OnSensitivityChanged(float v) { PlayerPrefs.SetFloat("mouse_sens", v); }
     public void OnInvertYChanged(bool on)     { PlayerPrefs.SetInt("invert_y", on ? 1 : 0); }
     public void OnFovChanged(float v)         { PlayerPrefs.SetFloat("fov", v); }
 
-    // ===== Saves/Loads (SaveManager) =====
-    public void Btn_SaveSlot1() { SaveManager.SaveSlot(1); RefreshSavesPanel(); }
-    public void Btn_SaveSlot2() { SaveManager.SaveSlot(2); RefreshSavesPanel(); }
-    public void Btn_SaveSlot3() { SaveManager.SaveSlot(3); RefreshSavesPanel(); }
+    // ===== Slot‑based save/load pomocí GameSaveController =====
+    public void Btn_SaveSlot1()
+    {
+        if (saveCtrl == null) saveCtrl = FindObjectOfType<GameSaveController>();
+        saveCtrl.SaveSlot(1);
+        RefreshSavesPanel();
+    }
+    public void Btn_SaveSlot2()
+    {
+        if (saveCtrl == null) saveCtrl = FindObjectOfType<GameSaveController>();
+        saveCtrl.SaveSlot(2);
+        RefreshSavesPanel();
+    }
+    public void Btn_SaveSlot3()
+    {
+        if (saveCtrl == null) saveCtrl = FindObjectOfType<GameSaveController>();
+        saveCtrl.SaveSlot(3);
+        RefreshSavesPanel();
+    }
 
-    public void Btn_LoadSlot1() { SaveManager.IsNewGame = false; CloseAllMenusForGameplay(); SaveManager.LoadSlot(1); }
-    public void Btn_LoadSlot2() { SaveManager.IsNewGame = false; CloseAllMenusForGameplay(); SaveManager.LoadSlot(2); }
-    public void Btn_LoadSlot3() { SaveManager.IsNewGame = false; CloseAllMenusForGameplay(); SaveManager.LoadSlot(3); }
+    public void Btn_LoadSlot1()
+    {
+        if (saveCtrl == null) saveCtrl = FindObjectOfType<GameSaveController>();
+        GameSaveController.IsNewGame = false;
+        CloseAllMenusForGameplay();
+        saveCtrl.LoadSlot(1);
+    }
+    public void Btn_LoadSlot2()
+    {
+        if (saveCtrl == null) saveCtrl = FindObjectOfType<GameSaveController>();
+        GameSaveController.IsNewGame = false;
+        CloseAllMenusForGameplay();
+        saveCtrl.LoadSlot(2);
+    }
+    public void Btn_LoadSlot3()
+    {
+        if (saveCtrl == null) saveCtrl = FindObjectOfType<GameSaveController>();
+        GameSaveController.IsNewGame = false;
+        CloseAllMenusForGameplay();
+        saveCtrl.LoadSlot(3);
+    }
 
-    public void Btn_DeleteSlot1() { SaveManager.DeleteSlot(1); RefreshSavesPanel(); RefreshLoadsPanel(); }
-    public void Btn_DeleteSlot2() { SaveManager.DeleteSlot(2); RefreshSavesPanel(); RefreshLoadsPanel(); }
-    public void Btn_DeleteSlot3() { SaveManager.DeleteSlot(3); RefreshSavesPanel(); RefreshLoadsPanel(); }
+    public void Btn_DeleteSlot1()
+    {
+        if (saveCtrl == null) saveCtrl = FindObjectOfType<GameSaveController>();
+        saveCtrl.DeleteSlot(1);
+        RefreshSavesPanel();
+        RefreshLoadsPanel();
+    }
+    public void Btn_DeleteSlot2()
+    {
+        if (saveCtrl == null) saveCtrl = FindObjectOfType<GameSaveController>();
+        saveCtrl.DeleteSlot(2);
+        RefreshSavesPanel();
+        RefreshLoadsPanel();
+    }
+    public void Btn_DeleteSlot3()
+    {
+        if (saveCtrl == null) saveCtrl = FindObjectOfType<GameSaveController>();
+        saveCtrl.DeleteSlot(3);
+        RefreshSavesPanel();
+        RefreshLoadsPanel();
+    }
 
     void RefreshSavesPanel()
     {
-        if (slot1Label) slot1Label.text = SaveManager.SlotSummary(1);
-        if (slot2Label) slot2Label.text = SaveManager.SlotSummary(2);
-        if (slot3Label) slot3Label.text = SaveManager.SlotSummary(3);
-
-        if (slot1Thumb) ApplyThumb(slot1Thumb, SaveManager.LoadThumbnail(1));
-        if (slot2Thumb) ApplyThumb(slot2Thumb, SaveManager.LoadThumbnail(2));
-        if (slot3Thumb) ApplyThumb(slot3Thumb, SaveManager.LoadThumbnail(3));
+        if (saveCtrl == null) saveCtrl = FindObjectOfType<GameSaveController>();
+        if (slot1Label) slot1Label.text = saveCtrl.SlotSummary(1);
+        if (slot2Label) slot2Label.text = saveCtrl.SlotSummary(2);
+        if (slot3Label) slot3Label.text = saveCtrl.SlotSummary(3);
+        if (slot1Thumb) ApplyThumb(slot1Thumb, null);
+        if (slot2Thumb) ApplyThumb(slot2Thumb, null);
+        if (slot3Thumb) ApplyThumb(slot3Thumb, null);
     }
+
     void RefreshLoadsPanel()
     {
-        if (load1Label) load1Label.text = SaveManager.SlotSummary(1);
-        if (load2Label) load2Label.text = SaveManager.SlotSummary(2);
-        if (load3Label) load3Label.text = SaveManager.SlotSummary(3);
-
-        if (load1Thumb) ApplyThumb(load1Thumb, SaveManager.LoadThumbnail(1));
-        if (load2Thumb) ApplyThumb(load2Thumb, SaveManager.LoadThumbnail(2));
-        if (load3Thumb) ApplyThumb(load3Thumb, SaveManager.LoadThumbnail(3));
+        if (saveCtrl == null) saveCtrl = FindObjectOfType<GameSaveController>();
+        if (load1Label) load1Label.text = saveCtrl.SlotSummary(1);
+        if (load2Label) load2Label.text = saveCtrl.SlotSummary(2);
+        if (load3Label) load3Label.text = saveCtrl.SlotSummary(3);
+        if (load1Thumb) ApplyThumb(load1Thumb, null);
+        if (load2Thumb) ApplyThumb(load2Thumb, null);
+        if (load3Thumb) ApplyThumb(load3Thumb, null);
     }
+
     static void ApplyThumb(RawImage img, Texture2D tex)
     {
         if (!img) return;
@@ -388,7 +437,6 @@ public class MenuController : MonoBehaviour
         img.color = tex ? Color.white : new Color(1,1,1,0.15f);
     }
 
-    // ===== helpers =====
     static int MsaaToIndex(int samples) => samples switch { 2=>1, 4=>2, 8=>3, _=>0 };
     static int IndexToMsaa(int idx) => idx switch { 1=>2, 2=>4, 3=>8, _=>1 };
     static int FullscreenToIndex(FullScreenMode m) => m switch {
@@ -412,17 +460,16 @@ public class MenuController : MonoBehaviour
 
     void RefreshOptionsPreview() { }
 
-    // ====== PUBLIC pro GameOverUI ======
     public void ShowMainMenu()          { _loadsBackToGameOver = false; ShowOnly(mainMenu); }
     public void ShowLoadsMenu()         { _loadsBackToGameOver = false; RefreshLoadsPanel(); ShowOnly(loads); }
     public void ShowLoadsFromGameOver() { _loadsBackToGameOver = true;  RefreshLoadsPanel(); ShowOnly(loads); GameManager.I?.EnableMenuCursor(); }
 
     static Obscurus.UI.InventoryOverlayUI FindInventoryOverlay()
     {
-    #if UNITY_2022_2_OR_NEWER
+#if UNITY_2022_2_OR_NEWER
         var x = FindFirstObjectByType<Obscurus.UI.InventoryOverlayUI>(FindObjectsInactive.Include);
         if (x) return x;
-    #endif
+#endif
         var all = Resources.FindObjectsOfTypeAll<Obscurus.UI.InventoryOverlayUI>();
         foreach (var c in all)
         {
