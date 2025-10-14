@@ -10,6 +10,7 @@ using Sirenix.OdinInspector;
 
 namespace Obscurus.Items
 {
+
 #if HAS_ODIN
     [HideMonoScript]
     [InlineEditor(InlineEditorObjectFieldModes.Foldout)]
@@ -141,7 +142,7 @@ namespace Obscurus.Items
                 itemId = Guid.NewGuid().ToString("N");
             if (maxStack < 1) maxStack = 1;
 
-            // MIGRACE: původní 'weapon' -> 'ranged' (jen když jde o Weapon a kind==Ranged a ranged zatím prázdný)
+            // MIGRACE: původní 'weapon' -> 'ranged' / 'melee'
             if (type == ItemType.Weapon && weapon != null)
             {
                 if (weaponKind == WeaponKind.Ranged)
@@ -167,7 +168,6 @@ namespace Obscurus.Items
                         ranged.startLoaded  = weapon.startLoaded;
                     }
                 }
-                // Pokud bys někdy používal staré WeaponData pro "melee", přenes co dává smysl:
                 if (weaponKind == WeaponKind.Melee)
                 {
                     bool isMeleeUnset =
@@ -177,7 +177,7 @@ namespace Obscurus.Items
                     if (isMeleeUnset)
                     {
                         melee.baseDamage     = weapon.baseDamage;
-                        melee.attackCooldown = Mathf.Max(0.1f, 1f / Mathf.Max(0.01f, weapon.attackSpeed)); // z attackSpeed udělej cooldown
+                        melee.attackCooldown = Mathf.Max(0.1f, 1f / Mathf.Max(0.01f, weapon.attackSpeed));
                         melee.critChance     = weapon.critChance;
                         melee.durability     = weapon.durability;
                     }
@@ -242,88 +242,135 @@ namespace Obscurus.Items
         [Min(0)] public int startLoaded = 0;
     }
 
-    /// <summary>NEW: Ranged zbraň – vlastní payload.</summary>
+    /// <summary>Ranged zbraň – rozšířená o damage typy, projektil a AoE parametry.</summary>
     [Serializable]
     public class RangedWeaponData
     {
 #if HAS_ODIN
-        [HorizontalGroup("rw1", 0.33f)] [LabelText("Base Damage")]
+        [HorizontalGroup("rw1", 0.25f)] [LabelText("Base Damage")]
 #endif
         public float baseDamage = 10f;
 
 #if HAS_ODIN
-        [HorizontalGroup("rw1", 0.33f)] [LabelText("Attack Speed")]
+        [HorizontalGroup("rw1", 0.25f)] [LabelText("Attack Speed")]
 #endif
         public float attackSpeed = 1.0f;
 
 #if HAS_ODIN
-        [HorizontalGroup("rw1", 0.34f)] [LabelText("Crit %")]
+        [HorizontalGroup("rw1", 0.25f)] [LabelText("Crit %")]
 #endif
         [Range(0, 100)] public float critChance = 0;
 
 #if HAS_ODIN
-        [HorizontalGroup("rw2", 0.5f)] [LabelText("Durability")]
+        [HorizontalGroup("rw1", 0.25f)] [LabelText("Durability")]
 #endif
         [Range(0, 100)] public float durability = 100f;
 
-#if HAS_ODIN
-        [HorizontalGroup("rw3", 0.6f)] [LabelText("Ammo Key"), Tooltip("Např. 'bolt_nail', 'pistol_ball'. Prázdné = bez munice.")]
-#endif
+        // --- Damage typing ---
+        [Header("Damage Typing")]
+        [Tooltip("Primární typ poškození zbraně (HUD/balance).")]
+        public DamageType primaryDamage = DamageType.Physical;
+
+        [Tooltip("Dodatečné tagy (např. Fire + Pierce).")]
+        public List<DamageType> extraDamageTags = new();
+
+        // --- Ammo & Magazine ---
+        [Header("Ammo & Magazine")]
+        [Tooltip("Identifikátor munice – musí sedět s položkou typu Ammunition v DB.")]
         public string ammoKey = "";
 
-#if HAS_ODIN
-        [HorizontalGroup("rw3", 0.4f)] [LabelText("Shots/Use")]
-#endif
-        [Min(1)] public int shotsPerUse = 1;
+        [Min(1), Tooltip("Výstřelů na jedno použití (burst).")]
+        public int shotsPerUse = 1;
 
-#if HAS_ODIN
-        [HorizontalGroup("rw4", 0.33f)] [LabelText("Magazine")]
-#endif
-        [Min(0)] public int magazineSize = 0;
+        [Min(0), Tooltip("Velikost zásobníku (0 = bez zásobníku).")]
+        public int magazineSize = 0;
 
-#if HAS_ODIN
-        [HorizontalGroup("rw4", 0.33f)] [LabelText("Reload (s)")]
-#endif
-        [Min(0f)] public float reloadSeconds = 1.5f;
+        [Min(0f), Tooltip("Reload v sekundách.")]
+        public float reloadSeconds = 1.5f;
 
-#if HAS_ODIN
-        [HorizontalGroup("rw4", 0.33f)] [LabelText("Start Loaded")]
-#endif
-        [Min(0)] public int startLoaded = 0;
+        [Min(0), Tooltip("Náboje po equipu.")]
+        public int startLoaded = 0;
+
+        // --- Projectile / Pattern ---
+        [Header("Projectile / Pattern")]
+        [Tooltip("Rychlost projektilu (m/s).")]
+        public float projectileSpeed = 120f;
+
+        [Tooltip("Životnost projektilu (s).")]
+        public float projectileLifetime = 3f;
+
+        [Tooltip("Použít gravitaci? 0/1 uložené v DB.")]
+        [Range(0f, 1f)] public float projectileGravity = 0f;
+
+        [Tooltip("Rozptyl ve stupních.")]
+        [Range(0f, 15f)] public float spreadAngleDeg = 0.5f;
+
+        [Tooltip("Počet pelet na výstřel (shotgun).")]
+        [Min(1)] public int pelletCount = 1;
+
+        [Tooltip("Násobič dmg pelet (pokud nedělíš mezi pelety).")]
+        public float pelletDamageMultiplier = 0.2f;
+
+        [Tooltip("1 = dělí damage mezi pelety; 0 = násobí pelletDamageMultiplier.")]
+        [Range(0f, 1f)] public float splitDamageAcrossPellets = 1f;
+
+        [Tooltip("Průraz (interpretace na projektilu).")]
+        public float penetration = 0f;
+
+        [Tooltip("Šance na odraz (0–1).")]
+        [Range(0f, 1f)] public float ricochetChance = 0f;
+
+        [Header("Headshot (volitelné)")]
+        [Range(0f, 1f)] public float canHeadshot = 0f;
+        public float headshotMultiplier = 1.5f;
+
+        // --- AoE / DoT ---
+        [Header("AoE / DoT (po dopadu)")]
+        [Range(0f, 1f)] public float aoeEnabled = 0f;
+        public DamageType aoeDamageType = DamageType.Lightning;
+        [Min(0f)] public float aoeRadius = 6f;
+        [Min(0f)] public float aoeDuration = 3f;
+        [Min(0.05f)] public float aoeTickInterval = 0.25f;
+        [Min(0f)] public float aoeDamage = 20f;
+        [Min(0f)] public float aoeSplashDelay = 0f;
+        [Min(0f)] public float aoeDotDps = 0f;
+        [Min(0f)] public float aoeDotDuration = 0f;
+
+        [Header("AoE Targeting (volitelné)")]
+        public LayerMask aoeHitMask = ~0;
+        public string aoeEnemyTag = "Enemy";
     }
 
-    /// <summary>NEW: Melee zbraň – vlastní payload.</summary>
+    /// <summary>Melee zbraň – doplněno typování poškození pro synergii s resistencemi.</summary>
     [Serializable]
     public class MeleeWeaponData
     {
 #if HAS_ODIN
-        [HorizontalGroup("mw1", 0.33f)] [LabelText("Base Damage")]
+        [HorizontalGroup("mw1", 0.25f)] [LabelText("Base Damage")]
 #endif
         public float baseDamage = 25f;
 
 #if HAS_ODIN
-        [HorizontalGroup("mw1", 0.33f)] [LabelText("Cooldown (s)")]
+        [HorizontalGroup("mw1", 0.25f)] [LabelText("Cooldown (s)")]
 #endif
         [Min(0.05f)] public float attackCooldown = 0.6f;
 
 #if HAS_ODIN
-        [HorizontalGroup("mw1", 0.34f)] [LabelText("Crit %")]
+        [HorizontalGroup("mw1", 0.25f)] [LabelText("Crit %")]
 #endif
         [Range(0, 100)] public float critChance = 0;
 
 #if HAS_ODIN
-        [HorizontalGroup("mw2", 0.5f)] [LabelText("Durability")]
+        [HorizontalGroup("mw1", 0.25f)] [LabelText("Durability")]
 #endif
         [Range(0, 100)] public float durability = 100f;
 
-#if HAS_ODIN
-        [HorizontalGroup("mw3", 0.5f)] [LabelText("Range")]
-#endif
-        [Min(0f)] public float range = 2.2f;
+        [Header("Damage Typing")]
+        public DamageType primaryDamage = DamageType.Physical;
+        public List<DamageType> extraDamageTags = new();
 
-#if HAS_ODIN
-        [HorizontalGroup("mw3", 0.5f)] [LabelText("Radius")]
-#endif
+        [Header("Reach")]
+        [Min(0f)] public float range = 2.2f;
         [Min(0f)] public float radius = 0.25f;
     }
 
@@ -339,6 +386,10 @@ namespace Obscurus.Items
         [HorizontalGroup("a1")] [LabelText("Durability")]
 #endif
         [Range(0, 100)] public float durability = 100f;
+
+        [Header("Resistence podle DamageType (volitelné)")]
+        [Tooltip("Seznam resistencí – flat se odečte, pak se násobí multiplikátorem.")]
+        public List<DamageResistance> resistances = new();
     }
 
     [Serializable]
@@ -408,7 +459,7 @@ namespace Obscurus.Items
         public string lore;
     }
 
-    // >>> Ammunition payload (rozšířeno o HUD)
+    // >>> Ammunition payload (rozšířeno o balistiku/tagy)
     [Serializable]
     public class AmmunitionData
     {
@@ -423,28 +474,45 @@ namespace Obscurus.Items
         [Min(1)] public int maxCarry = 200;
 
 #if HAS_ODIN
-        [HorizontalGroup("am2", 0.5f)] [LabelText("Damage Mult")]
+        [HorizontalGroup("am2", 0.33f)] [LabelText("Dmg Mult")]
 #endif
         [Min(0)] public float damageMultiplier = 1f;
 
 #if HAS_ODIN
-        [HorizontalGroup("am2", 0.5f)] [LabelText("Craft Batch Size")]
+        [HorizontalGroup("am2", 0.33f)] [LabelText("Speed Mult")]
+#endif
+        public float speedMultiplier = 1f;
+
+#if HAS_ODIN
+        [HorizontalGroup("am2", 0.34f)] [LabelText("Accuracy Mult")]
+#endif
+        public float accuracyMultiplier = 1f;
+
+        [Header("Penetrace / Odraz (volitelné)")]
+        public float penetrationBonus = 0f;
+        [Range(0f,1f)] public float ricochetChanceBonus = 0f;
+
+        [Header("Damage Tagy (volitelné)")]
+        public List<DamageType> addDamageTags = new();
+
+#if HAS_ODIN
+        [HorizontalGroup("am3", 0.5f)] [LabelText("Craft Batch Size")]
 #endif
         [Min(1)] public int craftBatchSize = 10;
 
-        // NEW: HUD
+        // HUD
 #if HAS_ODIN
-        [HorizontalGroup("am3", 0.5f)] [LabelText("HUD Icon")]
+        [HorizontalGroup("am3", 0.25f)] [LabelText("HUD Icon")]
 #endif
         public Sprite hudIcon;
 
 #if HAS_ODIN
-        [HorizontalGroup("am3", 0.5f)] [LabelText("HUD Binding Key")]
+        [HorizontalGroup("am3", 0.25f)] [LabelText("HUD Binding Key")]
 #endif
         public string hudBindingKey = "ammo_primary";
     }
 
-    // >>> (volitelné) Currency payload
+    // >>> Currency payload (POZOR: tohle bylo pryč – vracím zpět)
     [Serializable]
     public class CurrencyData
     {
@@ -524,5 +592,19 @@ namespace Obscurus.Items
             }
             return type.ToString();
         }
+    }
+
+    // ======= Reusable typ pro resistence (Armor) =======
+    [Serializable]
+    public class DamageResistance
+    {
+        [Tooltip("Typ poškození, na který se rezistence vztahuje.")]
+        public DamageType type = DamageType.Physical;
+
+        [Tooltip("Pevný odpočet z damage před multiplikací.")]
+        public float flatReduction = 0f;
+
+        [Tooltip("Multiplikátor poškození po odečtení flat části (0.8 = -20%).")]
+        public float multiplier = 1f;
     }
 }

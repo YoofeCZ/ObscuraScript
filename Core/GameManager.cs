@@ -7,6 +7,8 @@ using Sirenix.OdinInspector;
 #endif
 using Obscurus.Save;
 using Obscurus.Player;
+using Obscurus.Effects;
+
 public class GameManager : MonoBehaviour
 {
     public static GameManager I { get; private set; }
@@ -505,4 +507,12 @@ public class GameManager : MonoBehaviour
             if (bootstrapCamera && bootstrapAudio) break;
         }
     }
+
+    void Update()
+    {
+        // === Centrální efektový hub ===
+        EffectTickHub.Tick(Time.deltaTime);
+    }
 }
+
+

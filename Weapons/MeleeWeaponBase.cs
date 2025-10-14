@@ -2,6 +2,8 @@ using System;
 using UnityEngine;
 using Obscurus.Items;
 using Obscurus.Player;
+using Obscurus.Combat;       // typed damage
+
 using ItemWeaponKind = Obscurus.Items.WeaponKind;
 
 namespace Obscurus.Weapons
@@ -43,13 +45,13 @@ namespace Obscurus.Weapons
         // do MeleeWeaponBase
         public bool TryFire() => TryAttack();   // alias kvůli stávajícímu vstupu
 
-
         float _cooldown;
 
         // queue pro eventové trefy
         bool _waitingForAnimHit;
         Ray  _queuedRay;
         float _queuedDamage;
+        bool _queuedCrit;
 
         // IWeapon
         public WeaponKind Kind => WeaponKind.Melee;
@@ -167,13 +169,14 @@ namespace Obscurus.Weapons
             {
                 _queuedRay = ray;
                 _queuedDamage = damage;
+                _queuedCrit = isCrit;
                 _waitingForAnimHit = true;
             }
             else
             {
                 if (Physics.SphereCast(ray, Radius, out var hit, Range, hitMask, QueryTriggerInteraction.Ignore))
                 {
-                    ApplyDamage(hit, damage);
+                    ApplyDamage(hit, damage, isCrit);
                     PlayOneShot(hitSfx);
                     hitNow = true;
                 }
@@ -185,22 +188,28 @@ namespace Obscurus.Weapons
 
 
         // Volá se buď hned, nebo z Animation Eventu
-        void ApplyDamage(RaycastHit hit, float damage)
+        void ApplyDamage(RaycastHit hit, float damage, bool isCrit)
         {
             var go = hit.collider.attachedRigidbody ? hit.collider.attachedRigidbody.gameObject : hit.collider.gameObject;
 
+            // 1) explicitní receiver (pokud ho cíle používají)
             if (go.TryGetComponent<IDamageReceiver>(out var recv))
             {
                 recv.ApplyDamage(damage, hit.point, hit.normal, gameObject);
                 return;
             }
 
-            var hp = go.GetComponentInParent<HealthSystem>();
-            if (hp != null)
+            // 2) typed damage (jednotné s ranged)
+            var ctx = new DamageContext
             {
-                // hp.TakeDamage(damage, DamageType.Melee, gameObject);
-            }
+                amount = Mathf.Max(0f, damage),
+                primary = DamageType.Physical, // pro melee používáme Physical
+                isCrit = isCrit,
+                source = gameObject
+            };
+            TypedDamage.Apply(hit.collider, in ctx, hit.point, hit.normal, false);
 
+            // 3) debug log, pokud nic jiného
             Debug.Log($"[Melee] Hit {go.name} for {damage} dmg @ {hit.point}");
         }
 
@@ -214,7 +223,7 @@ namespace Obscurus.Weapons
 
             if (Physics.SphereCast(_queuedRay, Radius, out var hit, Range, hitMask, QueryTriggerInteraction.Ignore))
             {
-                ApplyDamage(hit, _queuedDamage);
+                ApplyDamage(hit, _queuedDamage, _queuedCrit);
                 PlayOneShot(hitSfx);
             }
 

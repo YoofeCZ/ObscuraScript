@@ -4,6 +4,7 @@ using System;
 using UnityEngine;
 using Obscurus.Items;
 using Obscurus.Player;
+using Obscurus.Combat;
 
 namespace Obscurus.Weapons
 {
@@ -37,6 +38,10 @@ namespace Obscurus.Weapons
         [Header("Debug / QoL")]
         public bool requireAmmo = true;
         public bool logReasons = true;
+
+        [Header("Cooldown routing")]
+        [Tooltip("Když true, TryShoot() nebude nastavovat ani respektovat _cooldown.")]
+        public bool ignoreBaseCooldown = false;
 
         [Header("SFX (optional)")]
         public AudioSource audioSource;
@@ -196,7 +201,9 @@ namespace Obscurus.Weapons
 
         public bool HasMagazine => MagazineSize > 0;
         public int  InMagazine  => HasMagazine ? _inMagazine : 0;
-        public bool IsReady     => _cooldown <= 0.0001f && !IsReloading;
+
+        public bool IsReady
+            => (ignoreBaseCooldown || _cooldown <= 0.0001f) && !IsReloading;
 
         public bool UseCameraAim { get => useCameraAim; set => useCameraAim = value; }
         public void SetAim(bool enabled) => useCameraAim = enabled;
@@ -218,27 +225,19 @@ namespace Obscurus.Weapons
             bool v = force ?? IsVisuallyLoaded();
             animator.SetBool(loadedParam, v);
         }
-        
-        // uvnitř RangedWeaponBase
+
         // Nastaví aktuální počet nábojů v zásobníku a notifikuje HUD/animator.
         public void SetMagazine(int count, bool notify = true)
         {
-            // správná interní proměnná a limit
             _inMagazine = Mathf.Clamp(count, 0, MagazineSize);
-
-            // aktualizuj vizuální „Loaded“ stav (pokud to zbraň používá)
             UpdateLoadedVisual();
-
-            // pošli event do HUDu
             if (notify) RaiseAmmoChanged();
         }
-
 
         public virtual void OnEquip(WeaponHolder holder)
         {
             if (!perks)
             {
-                // přes holder/inventory/parent – co najde dřív
                 perks = GetComponentInParent<AlchemyPerks>()
                         ?? (inventory ? inventory.GetComponent<AlchemyPerks>() : null)
                         ?? FindObjectOfType<AlchemyPerks>(true);
@@ -256,8 +255,8 @@ namespace Obscurus.Weapons
             }
 
             gameObject.SetActive(true);
-            ResetAnimatorFlags();       // čisté flagy
-            RaiseAmmoChanged();         // pošli stav do HUDu
+            ResetAnimatorFlags();
+            RaiseAmmoChanged();
         }
 
         public virtual void OnHolster()
@@ -287,10 +286,10 @@ namespace Obscurus.Weapons
                 if (t) muzzle = t;
             }
         }
-
+        
+        // === Enable ===
         protected virtual void OnEnable()
         {
-            // Použij startLoaded jen PŘI PRVNÍM enable (po instanci/pickupu).
             if (HasMagazine)
             {
                 if (!_appliedStartLoaded)
@@ -310,7 +309,6 @@ namespace Obscurus.Weapons
 
             UpdateLoadedVisual();
 
-            // volitelně: autoreload při equipu
             if (autoReloadOnEquipIfEmpty 
                 && HasMagazine 
                 && _inMagazine < ShotsPerUse 
@@ -326,7 +324,8 @@ namespace Obscurus.Weapons
 
         protected virtual void Update()
         {
-            if (_cooldown > 0f) _cooldown -= Time.deltaTime;
+            if (!ignoreBaseCooldown && _cooldown > 0f)
+                _cooldown -= Time.deltaTime;
         }
 
         public int GetReserve()
@@ -353,7 +352,6 @@ namespace Obscurus.Weapons
         {
             IsReloading = true;
 
-            // (volitelné) během reloadu ukaž prázdno:
             UpdateLoadedVisual(false);
 
             float t = 0f;
@@ -370,7 +368,7 @@ namespace Obscurus.Weapons
                 _inMagazine += taken;
                 PlayOneShot(reloadSfx);
                 RaiseAmmoChanged();
-                UpdateLoadedVisual(); // hotovo, ukaž „loaded“ pokud je co střílet
+                UpdateLoadedVisual();
             }
 
             IsReloading = false;
@@ -381,7 +379,7 @@ namespace Obscurus.Weapons
         public bool TryShoot()
         {
             if (weaponDef == null) return Fail("Missing weaponDef.");
-            if (muzzle == null)    return Fail("Missing muzzle.");
+            if (muzzle == null)    return Fail("Missing muzzle."); // u stafky si ji nastavujeme na beamOrigin v OnEquip
             if (!IsReady)          return Fail(IsReloading ? "Reloading." : "Cooldown.");
 
             int shots   = ShotsPerUse;
@@ -394,7 +392,7 @@ namespace Obscurus.Weapons
                     if (_inMagazine < shots) { PlayOneShot(emptySfx); return Fail("Empty magazine."); }
                     _inMagazine -= shots;
                     RaiseAmmoChanged();
-                    UpdateLoadedVisual(); // po výstřelu nastavíme Loaded=false, pokud došlo
+                    UpdateLoadedVisual();
                 }
             }
             else
@@ -412,10 +410,8 @@ namespace Obscurus.Weapons
 
             if (useCameraAim && !aimCamera) aimCamera = Camera.main;
 
-            // směr: do středu obrazovky
             Vector3 dir = GetAimDirectionFromCameraCenter();
 
-            // DAMAGE + AMMO MULT
             float damage = BaseDamage;
             if (!string.IsNullOrEmpty(aKey) && db != null)
             {
@@ -424,17 +420,24 @@ namespace Obscurus.Weapons
                     damage *= Mathf.Max(0f, ammoDef.ammo.damageMultiplier);
             }
 
-            // CRIT
             bool isCrit = (UnityEngine.Random.value * 100f) < CritChance;
             if (isCrit) damage *= Mathf.Max(1f, critMultiplier);
 
-            FireOneShot(dir, damage);
+            // ❗️Jednotný vstup: jen TYPED overload (legacy se vyřeší fallbackem v typed metodě)
+            var ctx = Obscurus.Combat.DamageTyping.BuildRangedContext(weaponDef, db, damage, isCrit, gameObject);
+            FireOneShot(dir, damage, in ctx);
 
-            // COOLDOWN: APS → 1/APS; fallback na fireCooldown
-            float cd = fireCooldown;
-            if (AttackSpeed > 0.001f) cd = 1f / AttackSpeed;
-
-            _cooldown = Mathf.Max(0.01f, cd);
+            // COOLDOWN – ignoruj pro staffy (kanálové zbraně)
+            if (!ignoreBaseCooldown)
+            {
+                float cd = fireCooldown;
+                if (AttackSpeed > 0.001f) cd = 1f / AttackSpeed;
+                _cooldown = Mathf.Max(0.01f, cd);
+            }
+            else
+            {
+                _cooldown = 0f;
+            }
 
             PlayOneShot(fireSfx);
             StartFireAnimation();
@@ -455,23 +458,39 @@ namespace Obscurus.Weapons
                 else
                     aimPoint = ray.GetPoint(aimRayMaxDistance);
 
-                // když je cíl příliš blízko → střílej rovně z kamery
+                if (aimDebug)
+                {
+                    Debug.DrawLine(aimCamera.transform.position, aimPoint, Color.cyan, 0.05f);
+                }
+
                 if (Vector3.Distance(aimCamera.transform.position, aimPoint) < 1f)
                     return aimCamera.transform.forward;
 
-                // jinak směr od muzzle na aimPoint
-                return (aimPoint - muzzle.position).normalized;
+                var originPos = muzzle ? muzzle.position : transform.position;
+                var dir = (aimPoint - originPos).normalized;
+
+                if (aimDebug)
+                {
+                    Debug.DrawRay(originPos, dir * 2.5f, Color.yellow, 0.05f);
+                }
+
+                return dir;
             }
 
-            return muzzle.forward;
+            return muzzle ? muzzle.forward : transform.forward;
+        }
+        
+        // === NOVÉ: bridge overload – potomci mohou přepsat a pracovat s typy
+        // defaultně zachovej staré chování (legacy) přes fallback na float overload
+        protected virtual void FireOneShot(Vector3 dir, float damage, in DamageContext ctx)
+        {
+            FireOneShot(dir, damage);
         }
 
-
-        /// Implementuj v potomkovi: vystřel projektil / raycast, a po zásahu zavolej Perk_OnHit(...)
         protected abstract void FireOneShot(Vector3 dir, float damage);
 
         // ===== Vitriol helper: volej po zásahu cíle (z projektilu/raycastu) =====
-        protected void Perk_OnHit(GameObject target, Vector3 hitPoint, Vector3 hitNormal)
+        public void Perk_OnHit(GameObject target, Vector3 hitPoint, Vector3 hitNormal)
         {
             if (!perks || !target) return;
 
@@ -490,26 +509,18 @@ namespace Obscurus.Weapons
 
         // ===== Animator helpers =====
         void StartFireAnimation()
-        {
-            if (!animator || string.IsNullOrEmpty(fireParam)) return;
-            if (_fireAnimCo != null) StopCoroutine(_fireAnimCo);
-
-            if (animatorUsesTriggers) animator.SetTrigger(fireParam);
-            else animator.SetBool(fireParam, true);
-
-            _fireAnimCo = StartCoroutine(CoResetParamWhenStateEnds(fireParam, fireStateName));
-        }
+            { if (!animator || string.IsNullOrEmpty(fireParam)) return;
+              if (_fireAnimCo != null) StopCoroutine(_fireAnimCo);
+              if (animatorUsesTriggers) animator.SetTrigger(fireParam);
+              else animator.SetBool(fireParam, true);
+              _fireAnimCo = StartCoroutine(CoResetParamWhenStateEnds(fireParam, fireStateName)); }
 
         void StartReloadAnimation()
-        {
-            if (!animator || string.IsNullOrEmpty(reloadParam)) return;
-            if (_reloadAnimCo != null) StopCoroutine(_reloadAnimCo);
-
-            if (animatorUsesTriggers) animator.SetTrigger(reloadParam);
-            else animator.SetBool(reloadParam, true);
-
-            _reloadAnimCo = StartCoroutine(CoResetParamWhenStateEnds(reloadParam, reloadStateName));
-        }
+            { if (!animator || string.IsNullOrEmpty(reloadParam)) return;
+              if (_reloadAnimCo != null) StopCoroutine(_reloadAnimCo);
+              if (animatorUsesTriggers) animator.SetTrigger(reloadParam);
+              else animator.SetBool(reloadParam, true);
+              _reloadAnimCo = StartCoroutine(CoResetParamWhenStateEnds(reloadParam, reloadStateName)); }
 
         IEnumerator CoResetParamWhenStateEnds(string param, string stateName)
         {

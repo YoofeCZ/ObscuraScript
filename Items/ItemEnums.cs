@@ -69,4 +69,14 @@ namespace Obscurus.Items
         Sub_Aurum,
         Sub_Mercurius
     }
+
+    // NEW — typy poškození (použij v definici zbraní, munice i armoru/rezistencí)
+    public enum DamageType
+    {
+        Physical,
+        Pierce, Slash, Blunt,      // podtypy fyzického (volitelné)
+        Fire, Frost, Lightning,    // elementy
+        Acid, Poison,              // DoT / korozivní
+        Arcane, Holy, Shadow       // fantasy/okultní
+    }
 }

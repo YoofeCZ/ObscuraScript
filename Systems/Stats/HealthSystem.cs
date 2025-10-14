@@ -4,12 +4,16 @@
 using System;
 using UnityEngine;
 using Obscurus.Console;
+using Obscurus.Weapons;   // << potřeba pro IDamageable, IDamageReceiver, DamageMessage
 #if HAS_ODIN
 using Sirenix.OdinInspector;
 #endif
 
 [DisallowMultipleComponent]
-public class HealthSystem : MonoBehaviour, IConsoleProvider
+public class HealthSystem : MonoBehaviour,
+                             IConsoleProvider,
+                             IDamageable,        // << přidáno
+                             IDamageReceiver     // << přidáno
 {
     [Header("Pool")]
     [Min(1)] public float baseMax = 100f; 
@@ -75,10 +79,9 @@ public class HealthSystem : MonoBehaviour, IConsoleProvider
         RaiseChanged();
     }
 
-
     public void LinkArmorIfMissing() { if (!armor) armor = GetComponent<ArmorSystem>(); }
 
-    // === UPRAVENO: heal s označením zdroje + Golden Blood + Lucky Sip ===
+    // === HEAL ===
     public void Heal(float amount, HealSource src = HealSource.Unknown)
     {
         if (amount <= 0f || _dead) return;
@@ -98,6 +101,7 @@ public class HealthSystem : MonoBehaviour, IConsoleProvider
         if (perks) perks.TryActivateLuckySip(this, src);
     }
 
+    // === DAMAGE jádro ===
     public void Damage(float amount)
     {
         if (amount <= 0f || _dead) return;
@@ -115,10 +119,9 @@ public class HealthSystem : MonoBehaviour, IConsoleProvider
             return;
         }
 
-        // navrhni novou hodnotu
         float proposed = Mathf.Max(0f, current - toHealth);
 
-        // === UPRAVENO: Second Wind (clamp na 10 %, bez i-frames) ===
+        // Second Wind
         bool secondWindTriggered = false;
         var perks = GetComponent<AlchemyPerks>();
         if (perks)
@@ -128,7 +131,7 @@ public class HealthSystem : MonoBehaviour, IConsoleProvider
         current = proposed;
 
         _regenTimer  = regenDelay;
-        _invulnTimer = secondWindTriggered ? 0f : postHitInvuln; // bez i-frames při SW
+        _invulnTimer = secondWindTriggered ? 0f : postHitInvuln;
 
         float delta = old - current;
         if (!Mathf.Approximately(delta, 0f)) { RaiseChanged(); OnDamaged?.Invoke(delta); }
@@ -235,5 +238,29 @@ public class HealthSystem : MonoBehaviour, IConsoleProvider
     {
         Kill();
         return "Player killed.";
+    }
+
+    // =====================================================================
+    // ============ ADAPTERY PRO PŘÍJEM DMG Z RŮZNÝCH SYSTÉMŮ ==============
+    // =====================================================================
+
+    // DamageUtil (IDamageable) → přijme DamageMessage
+    public void ApplyDamage(DamageMessage msg)
+    {
+        Damage(Mathf.Max(0f, msg.amount));
+    }
+
+    // Zbraně/AI, které volají přímo IDamageReceiver
+    public void ApplyDamage(float amount, Vector3 hitPoint, Vector3 hitNormal, GameObject source)
+    {
+        Damage(Mathf.Max(0f, amount));
+    }
+
+    // Fallback pro SendMessage("ApplyDamage", X) s různými payloady
+    public void ApplyDamage(object payload)
+    {
+        if (payload is DamageMessage m) { ApplyDamage(m); return; }
+        if (payload is float f)         { Damage(Mathf.Max(0f, f)); return; }
+        // jiné typy ignoruj
     }
 }

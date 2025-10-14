@@ -1,5 +1,6 @@
-// CrossbowWeapon.cs (beze změn logiky; jen použijeme dir z base)
+// Assets/Obscurus/Scripts/Weapons/CrossbowWeapon.cs
 using UnityEngine;
+using Obscurus.Combat;
 
 namespace Obscurus.Weapons
 {
@@ -11,19 +12,29 @@ namespace Obscurus.Weapons
         public float projectileLifetime = 10f;
         public bool useGravity = false;
 
-        protected override void FireOneShot(Vector3 dir, float damage)
+        // helper s DamageContext (NENÍ override – jen overload)
+        protected void FireOneShot(Vector3 dir, float damage, in DamageContext ctx)
         {
             if (!projectilePrefab || muzzle == null) return;
 
-            var go = Instantiate(projectilePrefab, muzzle.position, Quaternion.LookRotation(dir, Vector3.up));
+            var go   = Instantiate(projectilePrefab, muzzle.position, Quaternion.LookRotation(dir, Vector3.up));
             var proj = go.GetComponent<ArrowProjectile>();
             if (proj)
             {
-                proj.Launch(dir.normalized * Mathf.Max(0.1f, projectileSpeed),
-                    damage, gameObject,
+                proj.Launch(
+                    dir.normalized * Mathf.Max(0.1f, projectileSpeed),
+                    in ctx, gameObject,
                     Mathf.Max(0.5f, projectileLifetime),
-                    useGravity);
+                    useGravity
+                );
             }
+        }
+
+        // povinný override z base – postaví ctx z databáze
+        protected override void FireOneShot(Vector3 dir, float damage)
+        {
+            var ctx = DamageTyping.BuildRangedContext(weaponDef, db, damage, false, gameObject);
+            FireOneShot(dir, damage, in ctx);
         }
     }
 }

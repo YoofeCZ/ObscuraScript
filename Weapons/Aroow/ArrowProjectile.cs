@@ -1,54 +1,70 @@
+// Assets/Obscurus/Scripts/Weapons/ArrowProjectile.cs
 using UnityEngine;
+using Obscurus.Combat;
 
 namespace Obscurus.Weapons
 {
-    /// Šíp: letí, ray/spherecastem chytá zásah a ZAPÍCHNE se hrotem do povrchu.
     [RequireComponent(typeof(Rigidbody))]
     public class ArrowProjectile : MonoBehaviour
     {
         [Header("Model orientation")]
-        [Tooltip("Která LOKÁLNÍ osa modelu míří z ocasu k hrotu? (např. (0,1,0) když je šíp podél +Y).")]
-        public Vector3 modelForwardLocal = Vector3.forward;        // <<< nastav podle svého modelu
+        public Vector3 modelForwardLocal = Vector3.forward;
 
         [Header("Sticking")]
-        public Transform stickStop;                 // bod těsně za hrotem
+        public Transform stickStop;
         public float    fallbackPenetration = 0.06f;
         public bool     alignToSurfaceNormal = true;
         public bool     parentToHit = true;
         public LayerMask hitMask = ~0;
 
         [Header("Raycast pre-hit (proti odrazu)")]
-        public float castRadius = 0.03f;           // můžeš doladit (tenčí -> 0.015)
+        public float castRadius = 0.03f;
 
         [Header("Lifetime")]
         public float stickSeconds = 5f;
         public bool  destroyOnNoHit = true;
 
-        Rigidbody _rb;
-        float _life, _spawnTime, _damage;
-        GameObject _owner;
-        bool _stuck;
-        Vector3 _lastTipPos;
+        private DamageContext _ctx;
+        private Rigidbody _rb;
+        private float _life, _spawnTime;
+        private GameObject _owner;
+        private bool _stuck;
+        private Vector3 _lastTipPos;
 
         void Awake() => _rb = GetComponent<Rigidbody>();
 
-        public void Launch(Vector3 velocity, float damage, GameObject owner, float life, bool useGravity)
+        // preferovaný typed overload
+        public void Launch(Vector3 velocity, in DamageContext ctx, GameObject owner, float life, bool useGravity)
         {
+            _ctx       = ctx;
             _owner     = owner;
-            _damage    = damage;
             _life      = life;
             _spawnTime = Time.time;
 
             _rb.useGravity = useGravity;
             _rb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+#if UNITY_6000_0_OR_NEWER
             _rb.linearVelocity = velocity;
-
-            // prvotní orientace podle rychlosti + korekce osy modelu  // <<<
-            Quaternion rot = Quaternion.LookRotation(velocity.normalized, Vector3.up);
+#else
+            _rb.velocity = velocity;
+#endif
+            Quaternion rot  = Quaternion.LookRotation(velocity.normalized, Vector3.up);
             Quaternion corr = Quaternion.FromToRotation(modelForwardLocal.normalized, Vector3.forward);
             transform.rotation = rot * corr;
 
             _lastTipPos = GetTipWorld();
+        }
+
+        // legacy kompatibilita – NEpoužívám žádný DamageType
+        public void Launch(Vector3 velocity, float damage, GameObject owner, float life, bool useGravity)
+        {
+            var simple = new DamageContext
+            {
+                amount = Mathf.Max(0f, damage),
+                source = owner
+                // ostatní pole necháme na default
+            };
+            Launch(velocity, in simple, owner, life, useGravity);
         }
 
         void FixedUpdate()
@@ -66,7 +82,7 @@ namespace Obscurus.Weapons
                     var hitGO = hit.rigidbody ? hit.rigidbody.gameObject : hit.collider.gameObject;
                     if (!_owner || hitGO != _owner)
                     {
-                        DoDamage(hitGO);
+                        ApplyDamage(hit.collider, hit.point, hit.normal);
                         StickTo(hit.transform, hit.point, hit.normal);
                         return;
                     }
@@ -78,11 +94,15 @@ namespace Obscurus.Weapons
 
         void Update()
         {
-            if (!_stuck && _rb && _rb.linearVelocity.sqrMagnitude > 0.01f)
+#if UNITY_6000_0_OR_NEWER
+            var v = _rb.linearVelocity;
+#else
+            var v = _rb.velocity;
+#endif
+            if (!_stuck && _rb && v.sqrMagnitude > 0.01f)
             {
-                // drž vizuál ve směru letu + korekce osy
                 Quaternion corr = Quaternion.FromToRotation(modelForwardLocal.normalized, Vector3.forward);
-                transform.rotation = Quaternion.LookRotation(_rb.linearVelocity.normalized, Vector3.up) * corr;
+                transform.rotation = Quaternion.LookRotation(v.normalized, Vector3.up) * corr;
             }
 
             if (Time.time >= _spawnTime + _life)
@@ -93,44 +113,39 @@ namespace Obscurus.Weapons
         {
             if (_stuck) return;
             if ((hitMask.value & (1 << c.collider.gameObject.layer)) == 0) return;
+            if (_owner && c.collider.transform.IsChildOf(_owner.transform)) return;
 
-            var hitGO = c.collider.attachedRigidbody ? c.collider.attachedRigidbody.gameObject : c.collider.gameObject;
-            if (_owner && hitGO == _owner) return;
+            Vector3 hitPoint, hitNormal;
+            if (c.contactCount > 0)
+            {
+                var contact = c.GetContact(0);
+                hitPoint = contact.point;
+                hitNormal = contact.normal;
+            }
+            else
+            {
+                hitPoint = transform.position;
+                hitNormal = Vector3.up;
+            }
 
-            DoDamage(hitGO);
-
-            Vector3 point, normal;
-            if (c.contactCount > 0) { var ct = c.GetContact(0); point = ct.point; normal = ct.normal; }
-            else { point = c.collider.ClosestPoint(transform.position); normal = -(_rb.linearVelocity.sqrMagnitude > 0.001f ? _rb.linearVelocity.normalized : transform.forward); }
-
-            StickTo(hitGO.transform, point, normal);
+            ApplyDamage(c.collider, hitPoint, hitNormal);
+            StickTo(c.collider.transform, hitPoint, hitNormal);
         }
 
-        void OnTriggerEnter(Collider col)
-        {
-            if (_stuck) return;
-            if ((hitMask.value & (1 << col.gameObject.layer)) == 0) return;
-            if (_owner && col.attachedRigidbody && col.attachedRigidbody.gameObject == _owner) return;
-
-            DoDamage(col.attachedRigidbody ? col.attachedRigidbody.gameObject : col.gameObject);
-
-            Vector3 point  = col.ClosestPoint(transform.position);
-            Vector3 normal = -(_rb.linearVelocity.sqrMagnitude > 0.001f ? _rb.linearVelocity.normalized : transform.forward);
-            StickTo(col.attachedRigidbody ? col.attachedRigidbody.transform : col.transform, point, normal);
-        }
-
-        // === helpers ===
         Vector3 GetTipWorld()
         {
             if (stickStop) return stickStop.position;
-            // bez stickStopu ber „hrot“ kousek před kořenem (podél lokálního „forwardu“ modelu)
-            return transform.position + (transform.rotation * (Quaternion.FromToRotation(Vector3.forward, modelForwardLocal) * Vector3.forward)) * Mathf.Max(0.01f, fallbackPenetration);
+            return transform.position +
+                   (transform.rotation *
+                    (Quaternion.FromToRotation(Vector3.forward, modelForwardLocal) * Vector3.forward)) *
+                   Mathf.Max(0.01f, fallbackPenetration);
         }
 
-        void DoDamage(GameObject hitGO)
+        void ApplyDamage(Collider col, Vector3 point, Vector3 normal)
         {
-            var hp = hitGO.GetComponentInParent<HealthSystem>();
-            if (hp) hp.Damage(Mathf.Max(0f, _damage));
+            if (_ctx.source == null) _ctx.source = _owner;
+            if (_ctx.amount <= 0f)  _ctx.amount = 1f;
+            TypedDamage.Apply(col, in _ctx, point, normal, false);
         }
 
         void StickTo(Transform hit, Vector3 point, Vector3 normal)
@@ -138,22 +153,23 @@ namespace Obscurus.Weapons
             if (_stuck) return;
             _stuck = true;
 
-            // tvrdé vypnutí fyziky i kolizí – žádný odraz
+#if UNITY_6000_0_OR_NEWER
             _rb.linearVelocity = Vector3.zero;
+#else
+            _rb.velocity = Vector3.zero;
+#endif
             _rb.angularVelocity = Vector3.zero;
             _rb.isKinematic = true;
             _rb.detectCollisions = false;
             _rb.useGravity = false;
-            foreach (var col in GetComponentsInChildren<Collider>()) col.enabled = false;
+            foreach (var c in GetComponentsInChildren<Collider>()) c.enabled = false;
 
-            // výsledná rotace (hrot do povrchu) + korekce osy modelu
             Quaternion face = alignToSurfaceNormal
                 ? Quaternion.LookRotation(-normal, Vector3.up)
-                : Quaternion.LookRotation(((_rb.linearVelocity.sqrMagnitude > 0.001f) ? _rb.linearVelocity : transform.forward).normalized, Vector3.up);
+                : Quaternion.LookRotation(transform.forward, Vector3.up);
             Quaternion corr = Quaternion.FromToRotation(modelForwardLocal.normalized, Vector3.forward);
             Quaternion rot  = face * corr;
 
-            // tak aby stickStop seděl přesně v contact pointu
             if (stickStop)
             {
                 Vector3 rootPos = point - (rot * stickStop.localPosition);

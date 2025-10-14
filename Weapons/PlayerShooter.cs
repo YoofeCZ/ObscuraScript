@@ -1,4 +1,5 @@
 using UnityEngine;
+using UnityEngine.InputSystem; // ⬅️ kvůli Mouse.current
 using Obscurus.Weapons;
 
 namespace Obscurus.Player
@@ -9,6 +10,9 @@ namespace Obscurus.Player
         [Header("Runtime")]
         public WeaponHolder holder;
 
+        /// <summary>True, pokud hráč právě drží tlačítko střelby (drží spoušť).</summary>
+        public static bool IsFiring { get; private set; }
+
         void Awake()
         {
             holder = GetComponentInParent<WeaponHolder>();
@@ -16,11 +20,33 @@ namespace Obscurus.Player
             holder.isPlayerHolder = true;
         }
 
+        void Update()
+        {
+            // ✅ Sleduj levé tlačítko myši (Input System)
+            if (Mouse.current != null)
+            {
+                IsFiring = Mouse.current.leftButton.isPressed;
+            }
+            else
+            {
+                // fallback pro starý Input manager
+                IsFiring = Input.GetMouseButton(0);
+            }
+
+            // Pokud držíš spoušť, automaticky spouštěj střelbu
+            if (IsFiring)
+            {
+                Fire();
+            }
+        }
+
         public void Fire(bool heavy = false)
         {
             var w = holder?.Current;
-            if (w is RangedWeaponBase rw) rw.TryShoot();
-            else if (w is MeleeWeaponBase mw) mw.TryAttack();
+            if (w is RangedWeaponBase rw)
+                rw.TryShoot();
+            else if (w is MeleeWeaponBase mw)
+                mw.TryAttack();
         }
 
         public void Reload() => (holder?.Current as RangedWeaponBase)?.BeginReload();
