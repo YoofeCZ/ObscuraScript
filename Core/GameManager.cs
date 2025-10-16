@@ -98,6 +98,10 @@ public class GameManager : MonoBehaviour
     [Button(ButtonSizes.Medium)]
 #endif
     public void LoadExample() => LoadLevel("Example");
+#if ODIN_INSPECTOR
+    [Button(ButtonSizes.Medium)]
+#endif
+    public void LoadTrainingAI() => LoadLevel("TrainingAI");    
 
     public void LoadLevel(string levelName)
     {
@@ -365,7 +369,12 @@ public class GameManager : MonoBehaviour
     // === SceneLoaded → spawn hráče ===
     void OnSceneLoaded_SpawnPlayer(Scene s, LoadSceneMode mode)
     {
-        if (s.name == "_Bootstrap") return;
+        // Přeskočit bootstrap i tréninkovou AI scénu
+        if (s.name == "_Bootstrap" || s.name == "TrainingAI")
+        {
+            Debug.Log($"[GameManager] Skipping player spawn in scene '{s.name}'.");
+            return;
+        }
 
         // Spawn jen pro právě cílovanou scénu
         if (!string.IsNullOrEmpty(_loadingLevelName) && s.name != _loadingLevelName)
